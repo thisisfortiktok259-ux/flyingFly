@@ -619,6 +619,12 @@ export async function loadFly(THREE, onProgress) {
       const accel = springTorque + dampTorque + gravityTorque;
       s.angularVel += accel * dt;
       s.angleDeg += s.angularVel * dt;
+      // One non-finite angle would propagate into the joint quaternion and
+      // blank the whole rig permanently; reset instead of poisoning it.
+      if (!Number.isFinite(s.angleDeg) || !Number.isFinite(s.angularVel)) {
+        s.angleDeg = Number.isFinite(restAngle) ? restAngle : 0;
+        s.angularVel = 0;
+      }
       const [lo, hi] = jointLimitsOf(dof);
       if (s.angleDeg < lo) {
         s.angleDeg = lo;
@@ -673,6 +679,18 @@ export async function loadFly(THREE, onProgress) {
 
     rootPhysics.sinkVel += (-K * (rootPhysics.sinkZ - targetSink) - C * rootPhysics.sinkVel) * dt;
     rootPhysics.sinkZ += rootPhysics.sinkVel * dt;
+    // Same guard for the root spring: a non-finite value here would move
+    // the whole body to NaN and it would never come back.
+    const rootNums = ['pitchDeg', 'pitchVel', 'rollDeg', 'rollVel',
+      'sinkZ', 'sinkVel'];
+    for (const k of rootNums) {
+      if (!Number.isFinite(rootPhysics[k])) {
+        rootPhysics.pitchDeg = 0; rootPhysics.pitchVel = 0;
+        rootPhysics.rollDeg = 0; rootPhysics.rollVel = 0;
+        rootPhysics.sinkZ = 0; rootPhysics.sinkVel = 0;
+        break;
+      }
+    }
   }
 
   /**
