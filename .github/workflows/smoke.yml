@@ -18,8 +18,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: pip install playwright==1.47.0
-      - run: python -m playwright install --with-deps chromium
+      # Output is silenced so the 20k job-log budget is left for diagnostics.
+      - name: Install Playwright (quiet)
+        run: |
+          pip install -q playwright==1.47.0 > /dev/null 2>&1
+          python -m playwright install --with-deps chromium > /dev/null 2>&1
+          echo installed
       - name: Headless smoke
         run: python3 ci_tmp/smoke2.py 35
       - uses: actions/upload-artifact@v4
