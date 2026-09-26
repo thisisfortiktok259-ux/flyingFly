@@ -224,9 +224,9 @@ class DataProxyTestCase(ServerTestCase):
         manifest_bytes = json.dumps(manifest).encode("utf-8")
         with mock.patch.object(srv, "_http_get", return_value=manifest_bytes):
             status, content_type, body = self._get("/data/manifest.json")
-        self.assertEqual(status, 200)
-        self.assertIn("json", (content_type or "").lower())
-        self.assertEqual(json.loads(body), manifest)
+            self.assertEqual(status, 200)
+            self.assertIn("json", (content_type or "").lower())
+            self.assertEqual(json.loads(body), manifest)
 
     def test_allowlisted_metadata_file_is_served(self):
         manifest = self._manifest()
@@ -240,9 +240,9 @@ class DataProxyTestCase(ServerTestCase):
 
         with mock.patch.object(srv, "_http_get", side_effect=fake_http_get):
             status, content_type, body = self._get("/data/neurons.json.gz")
-        self.assertEqual(status, 200)
-        self.assertEqual(content_type, "application/octet-stream")
-        self.assertEqual(body, gz_bytes)
+            self.assertEqual(status, 200)
+            self.assertEqual(content_type, "application/octet-stream")
+            self.assertEqual(body, gz_bytes)
 
     def test_allowlisted_array_part_is_verified_and_served(self):
         part_bytes = b"fake-offsets-part-data"
@@ -259,26 +259,26 @@ class DataProxyTestCase(ServerTestCase):
 
         with mock.patch.object(srv, "_http_get", side_effect=fake_http_get):
             status, content_type, body = self._get("/data/offsets-000.bin.gz")
-        self.assertEqual(status, 200)
-        self.assertEqual(content_type, "application/octet-stream")
-        self.assertEqual(body, part_bytes)
-        cached_path = srv.CACHE_DIR / "data" / "offsets-000.bin.gz"
-        self.assertTrue(cached_path.exists())
-        self.assertEqual(cached_path.read_bytes(), part_bytes)
+            self.assertEqual(status, 200)
+            self.assertEqual(content_type, "application/octet-stream")
+            self.assertEqual(body, part_bytes)
+            cached_path = srv.CACHE_DIR / "data" / "offsets-000.bin.gz"
+            self.assertTrue(cached_path.exists())
+            self.assertEqual(cached_path.read_bytes(), part_bytes)
 
     def test_non_manifest_filename_is_404(self):
         manifest = self._manifest()
         manifest_bytes = json.dumps(manifest).encode("utf-8")
         with mock.patch.object(srv, "_http_get", return_value=manifest_bytes):
             status, payload = self._get_json("/data/not-a-real-part.bin.gz")
-        self.assertEqual(status, 404)
-        self.assertIn("error", payload)
+            self.assertEqual(status, 404)
+            self.assertIn("error", payload)
 
     def test_traversal_filename_rejected_before_any_fetch(self):
         with mock.patch.object(srv, "_http_get") as mocked:
             status, _, _ = self._get("/data/..%2f..%2fserver.py")
-        self.assertIn(status, (400, 404))
-        mocked.assert_not_called()
+            self.assertIn(status, (400, 404))
+            mocked.assert_not_called()
 
     def test_sha256_mismatch_returns_502_and_does_not_cache(self):
         part_bytes = b"fake-offsets-part-data"
@@ -295,18 +295,19 @@ class DataProxyTestCase(ServerTestCase):
 
         with mock.patch.object(srv, "_http_get", side_effect=fake_http_get):
             status, payload = self._get_json("/data/offsets-000.bin.gz")
-        self.assertEqual(status, 502)
-        self.assertIn("error", payload)
-        cached_path = srv.CACHE_DIR / "data" / "offsets-000.bin.gz"
-        self.assertFalse(cached_path.exists())
+            self.assertEqual(status, 502)
+            self.assertIn("error", payload)
+            cached_path = srv.CACHE_DIR / "data" / "offsets-000.bin.gz"
+            self.assertFalse(cached_path.exists())
 
     def test_oversized_part_returns_502_and_does_not_cache(self):
-        # Declared size is tiny, so the hard-capped tolerance is exceeded by
-        # a deliberately larger download.
-        part_bytes = b"x" * 1000
-        manifest = self._manifest(
-            part_file="offsets-000.bin.gz", part_bytes=10, part_sha256=None
-        )
+        # Declared size is tiny (10 bytes); _size_cap_for_part pads that by
+        # DATA_PART_SIZE_TOLERANCE_BYTES (4096), so the effective cap is 4106
+        # bytes. The downloaded payload must clearly exceed that padded cap
+        # (not just the tiny declared size) for this test to actually
+        # exercise the oversized-part rejection path.
+        part_bytes = b"x" * 8192
+        manifest = self._manifest(part_file="offsets-000.bin.gz", part_bytes=10, part_sha256=None)
         manifest_bytes = json.dumps(manifest).encode("utf-8")
 
         def fake_http_get(url):
@@ -316,9 +317,10 @@ class DataProxyTestCase(ServerTestCase):
 
         with mock.patch.object(srv, "_http_get", side_effect=fake_http_get):
             status, payload = self._get_json("/data/offsets-000.bin.gz")
-        self.assertEqual(status, 502)
-        cached_path = srv.CACHE_DIR / "data" / "offsets-000.bin.gz"
-        self.assertFalse(cached_path.exists())
+            self.assertEqual(status, 502)
+            self.assertIn("error", payload)
+            cached_path = srv.CACHE_DIR / "data" / "offsets-000.bin.gz"
+            self.assertFalse(cached_path.exists())
 
 
 class NeuronSampleMockedTestCase(unittest.TestCase):
@@ -348,7 +350,8 @@ class NeuronSampleMockedTestCase(unittest.TestCase):
             "neurons": 3,
             "metadata": "neurons.json.gz",
             "metadataColumns": [
-                "bodyId", "type", "superclass", "side", "consensusNT", "fastSign", "somaLocation8nm",
+                "bodyId", "type", "superclass", "side", "consensusNT", "fastSign",
+                "somaLocation8nm",
             ],
         }
         rows = [
@@ -359,20 +362,20 @@ class NeuronSampleMockedTestCase(unittest.TestCase):
         with self._patched_fetch(manifest, rows):
             sample = srv._build_neuron_sample()
 
-        self.assertEqual(sample["dataset"], "MaleCNS v1.0")
-        self.assertEqual(sample["total"], 3)
-        self.assertEqual(len(sample["points"]), 3)
-        indices = {p["index"] for p in sample["points"]}
-        self.assertEqual(indices, {0, 1, 2})
-        for point in sample["points"]:
-            self.assertIn("x", point)
-            self.assertIn("y", point)
-            self.assertIn("z", point)
-            self.assertIn("index", point)
-            self.assertIn("type", point)
-            self.assertIn("superclass", point)
-            self.assertIn("side", point)
-            self.assertIn("nt", point)
+            self.assertEqual(sample["dataset"], "MaleCNS v1.0")
+            self.assertEqual(sample["total"], 3)
+            self.assertEqual(len(sample["points"]), 3)
+            indices = {p["index"] for p in sample["points"]}
+            self.assertEqual(indices, {0, 1, 2})
+            for point in sample["points"]:
+                self.assertIn("x", point)
+                self.assertIn("y", point)
+                self.assertIn("z", point)
+                self.assertIn("index", point)
+                self.assertIn("type", point)
+                self.assertIn("superclass", point)
+                self.assertIn("side", point)
+                self.assertIn("nt", point)
 
     def test_list_of_dicts_rows_are_parsed(self):
         """_build_neuron_sample uniformly scales all three axes by the same
@@ -387,7 +390,8 @@ class NeuronSampleMockedTestCase(unittest.TestCase):
             "neurons": 2,
             "metadata": "neurons.json.gz",
             "metadataColumns": [
-                "bodyId", "type", "superclass", "side", "consensusNT", "fastSign", "somaLocation8nm",
+                "bodyId", "type", "superclass", "side", "consensusNT", "fastSign",
+                "somaLocation8nm",
             ],
         }
         rows = [
@@ -411,14 +415,14 @@ class NeuronSampleMockedTestCase(unittest.TestCase):
         with self._patched_fetch(manifest, rows):
             sample = srv._build_neuron_sample()
 
-        self.assertEqual(len(sample["points"]), 2)
-        xs = {round(p["x"], 3) for p in sample["points"]}
-        expected = {round(-10 / 30, 3), round(10 / 30, 3)}
-        self.assertEqual(xs, expected)
-        indices = {p["index"] for p in sample["points"]}
-        self.assertEqual(indices, {0, 1})
-        superclasses = {p["superclass"] for p in sample["points"]}
-        self.assertEqual(superclasses, {"Kenyon", "olfactory"})
+            self.assertEqual(len(sample["points"]), 2)
+            xs = {round(p["x"], 3) for p in sample["points"]}
+            expected = {round(-10 / 30, 3), round(10 / 30, 3)}
+            self.assertEqual(xs, expected)
+            indices = {p["index"] for p in sample["points"]}
+            self.assertEqual(indices, {0, 1})
+            superclasses = {p["superclass"] for p in sample["points"]}
+            self.assertEqual(superclasses, {"Kenyon", "olfactory"})
 
     def test_rows_missing_soma_location_are_skipped_not_fabricated(self):
         manifest = {
@@ -426,7 +430,8 @@ class NeuronSampleMockedTestCase(unittest.TestCase):
             "neurons": 2,
             "metadata": "neurons.json.gz",
             "metadataColumns": [
-                "bodyId", "type", "superclass", "side", "consensusNT", "fastSign", "somaLocation8nm",
+                "bodyId", "type", "superclass", "side", "consensusNT", "fastSign",
+                "somaLocation8nm",
             ],
         }
         rows = [
@@ -436,8 +441,8 @@ class NeuronSampleMockedTestCase(unittest.TestCase):
         with self._patched_fetch(manifest, rows):
             sample = srv._build_neuron_sample()
 
-        self.assertEqual(len(sample["points"]), 1)
-        self.assertEqual(sample["points"][0]["index"], 0)
+            self.assertEqual(len(sample["points"]), 1)
+            self.assertEqual(sample["points"][0]["index"], 0)
 
     def test_non_array_metadata_raises_value_error(self):
         manifest = {"dataset": "MaleCNS v1.0", "neurons": 1, "metadata": "neurons.json.gz"}
@@ -470,11 +475,10 @@ class SafeGunzipTestCase(unittest.TestCase):
         self.assertEqual(restored, original)
 
     def test_raises_when_output_exceeds_cap(self):
-        # A highly compressible payload that decompresses far beyond a tiny cap.
-        original = b"0" * (5 * 1024 * 1024)  # 5 MiB of a single repeated byte
+        original = b"0" * (5 * 1024 * 1024)  # 5 MiB of single repeated byte
         compressed = gzip.compress(original)
         with self.assertRaises(ValueError):
-            srv._safe_gunzip(compressed, max_output_bytes=1024)  # 1 KiB cap
+            srv._safe_gunzip(compressed, max_output_bytes=1 * 1024)  # 1 KiB cap
 
 
 if __name__ == "__main__":

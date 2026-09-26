@@ -335,9 +335,7 @@ def _safe_gunzip(data: bytes, max_output_bytes: int) -> bytes:
             return
         total += len(piece)
         if total > max_output_bytes:
-            raise ValueError(
-                f"decompressed data exceeds {max_output_bytes} byte safety cap"
-            )
+            raise ValueError(f"decompressed data exceeds {max_output_bytes} byte safety cap")
         chunks.append(piece)
 
     for start in range(0, len(data), chunk_size):
@@ -365,9 +363,7 @@ def _load_manifest() -> dict:
     json.JSONDecodeError if the manifest is oversized or not a JSON object.
     Never returns a fabricated manifest.
     """
-    manifest_bytes = _fetch_cached(
-        f"{HF_DATA}/manifest.json", CACHE_DIR / "data" / "manifest.json"
-    )
+    manifest_bytes = _fetch_cached(f"{HF_DATA}/manifest.json", CACHE_DIR / "data" / "manifest.json")
     if len(manifest_bytes) > MAX_MANIFEST_BYTES:
         raise ValueError(f"manifest.json exceeds {MAX_MANIFEST_BYTES} byte safety cap")
     manifest = json.loads(manifest_bytes.decode("utf-8"))
@@ -447,13 +443,18 @@ def _extract_xyz(value):
                     return None
         return None
     if isinstance(value, str):
-        parts = re.split(r"[\[,\s\]+", value.strip("[]() "))
+        # NOTE: this character class must stay properly closed ("]" before
+        # the "+" quantifier). An earlier revision had an unterminated class
+        # here (missing the closing "]"), which raised re.error on every
+        # plain-string soma-location value instead of returning None.
+        parts = re.split(r"[\[\],\s]+", value.strip("[]() "))
         parts = [p for p in parts if p]
         if len(parts) >= 3:
             try:
                 return float(parts[0]), float(parts[1]), float(parts[2])
             except ValueError:
                 return None
+        return None
     return None
 
 
@@ -583,8 +584,6 @@ def get_neuron_sample():
 # ---------------------------------------------------------------------------
 # HTTP handler
 # ---------------------------------------------------------------------------
-
-
 class Handler(BaseHTTPRequestHandler):
     server_version = "FlyingFlyServer/1.0"
     protocol_version = "HTTP/1.1"
@@ -618,7 +617,6 @@ class Handler(BaseHTTPRequestHandler):
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
     # -- routing -------------------------------------------------------------
-
     def do_GET(self):
         path = self.path.split("?", 1)[0]
         try:
@@ -631,24 +629,22 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/assets/body/model.json":
                 return self._handle_body_model()
             if path.startswith("/assets/body/meshes/"):
-                return self._handle_body_mesh(path[len("/assets/body/meshes/") :])
+                return self._handle_body_mesh(path[len("/assets/body/meshes/"):])
             if path == "/data/manifest.json":
                 return self._handle_data_manifest()
             if path.startswith("/data/"):
-                return self._handle_data_file(path[len("/data/") :])
+                return self._handle_data_file(path[len("/data/"):])
             return self._send_error_json(404, "Not found.")
         except Exception as exc:  # last-resort guard, never leak internals
             self._send_error_json(500, f"Internal server error: {exc.__class__.__name__}")
 
     def do_POST(self):
-        path = self.path.split("?", 1)[0]
         try:
             return self._send_error_json(404, "Not found.")
         except Exception as exc:
             self._send_error_json(500, f"Internal server error: {exc.__class__.__name__}")
 
     # -- handlers --------------------------------------------------------------
-
     def _handle_static(self, filename: str, content_type: str):
         """Serve one fixed, allowlisted frontend file from BASE_DIR."""
         file_path = BASE_DIR / filename
@@ -663,9 +659,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_body_model(self):
         try:
-            data = _fetch_cached(
-                f"{HF_BODY_ASSETS}/model.json", CACHE_DIR / "body" / "model.json"
-            )
+            data = _fetch_cached(f"{HF_BODY_ASSETS}/model.json", CACHE_DIR / "body" / "model.json")
         except (urllib.error.URLError, OSError):
             return self._send_error_json(502, "Could not fetch body model.")
         self._send_bytes(200, "application/json; charset=utf-8", data)
@@ -685,9 +679,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_data_manifest(self):
         try:
-            data = _fetch_cached(
-                f"{HF_DATA}/manifest.json", CACHE_DIR / "data" / "manifest.json"
-            )
+            data = _fetch_cached(f"{HF_DATA}/manifest.json", CACHE_DIR / "data" / "manifest.json")
         except (urllib.error.URLError, OSError):
             return self._send_error_json(502, "Could not fetch manifest.")
         if len(data) > MAX_MANIFEST_BYTES:
@@ -727,9 +719,7 @@ class Handler(BaseHTTPRequestHandler):
                 f"{HF_DATA}/{filename}", cache_path, part.get("bytes"), part.get("sha256"), cap
             )
         except DataIntegrityError:
-            return self._send_error_json(
-                502, "Downloaded data file failed integrity verification."
-            )
+            return self._send_error_json(502, "Downloaded data file failed integrity verification.")
         except ValueError:
             return self._send_error_json(502, "Downloaded data file exceeded the safety size cap.")
         except (urllib.error.URLError, OSError):
@@ -755,8 +745,6 @@ class Handler(BaseHTTPRequestHandler):
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
-
-
 def main():
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
