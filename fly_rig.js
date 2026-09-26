@@ -213,13 +213,13 @@ function parseSTL(buffer, sourceLabel) {
 }
 
 // Converts raw STL vertex positions into a non-indexed BufferGeometry.
-// Scales by 1/meshScale, mirrors across Y when requested (fixing the
+// Scales by meshScale (raw STL metres -> model millimetres), mirrors across Y when requested (fixing the
 // resulting winding-order flip), and recomputes vertex normals from the
 // unwelded triangle soup (intentionally no index buffer, so normals stay
 // faceted per triangle rather than smoothed across shared vertices).
 function buildGeometry(THREE, rawPositions, meshScale, mirror) {
   const positions = new Float32Array(rawPositions.length);
-  const inv = 1 / meshScale;
+  const inv = meshScale; // metres -> model millimetres
   for (let i = 0; i < rawPositions.length; i += 3) {
     positions[i] = rawPositions[i] * inv;
     positions[i + 1] = rawPositions[i + 1] * inv * (mirror ? -1 : 1);
