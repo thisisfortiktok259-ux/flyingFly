@@ -2,16 +2,17 @@
   style.css
   ---------------------------------------------------------------------------
   Front-end styling only (HTML/CSS ownership). Dark split-screen sci-fi lab:
-  - Left panel: MaleCNS neuron telemetry (brain-canvas, scope, raster,
-    equalizer, motor sliders, event log).
-  - Right panel: animated street world (world-canvas, chapters, phone HUD,
-    captions).
-  Selectors below intentionally match the element IDs/classes described for
+  - Left panel "01 Мозг": MaleCNS point cloud, connectome download progress,
+    PAM oscilloscope, spike raster, 28-bar audio equalizer, event log.
+  - Right panel "02 Игра": 3D room/desk/laptop world, HUD counters/meters,
+    beetle subtitle bar, status line, comment feed side log.
+  Selectors below intentionally match the element IDs/classes used by
   game.js: brain-canvas, world-canvas, scope-canvas, raster-canvas,
-  equalizer, chapter-name, chapter-list, chapter-prev, chapter-next,
-  chapter-autoplay, caption, source-label, telemetry-rate,
-  motor-walk, motor-turn, motor-escape, status, sound-toggle, event-log,
-  loading-screen, error-banner.
+  equalizer, backend-label, brain-progress-fill, brain-progress-text,
+  telemetry-rate, spikes-rate, source-label, status, sound-toggle,
+  event-log, comment-log, subtitle, comments-count, forced-count,
+  fatigue-fill, fatigue-value, anger-fill, anger-value, loading-screen,
+  error-banner.
 */
 
 :root {
@@ -101,7 +102,7 @@ button {
   left: 0;
 }
 
-/* Focus visibility (keyboard) ----------------------------------------- */
+/* Focus visibility (keyboard) -------------------------------------------- */
 
 a:focus-visible,
 button:focus-visible,
@@ -113,7 +114,7 @@ canvas:focus-visible,
   border-radius: 4px;
 }
 
-/* App shell ------------------------------------------------------------ */
+/* App shell --------------------------------------------------------------- */
 
 .app-shell {
   display: flex;
@@ -184,7 +185,7 @@ canvas:focus-visible,
   font-size: 1rem;
 }
 
-/* Split screen layout --------------------------------------------------- */
+/* Split screen layout ------------------------------------------------------ */
 
 .split-screen {
   flex: 1;
@@ -230,7 +231,7 @@ canvas:focus-visible,
   color: var(--text-muted);
 }
 
-/* Brain panel ----------------------------------------------------------- */
+/* Brain panel --------------------------------------------------------------- */
 
 .brain-viewport {
   position: relative;
@@ -261,16 +262,10 @@ canvas:focus-visible,
   font-weight: 600;
 }
 
-.telemetry-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--gap);
-}
-
+.connectome-block,
 .scope-block,
 .raster-block,
 .equalizer-block,
-.motor-block,
 .log-block {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -278,26 +273,16 @@ canvas:focus-visible,
   background: var(--bg-raised);
 }
 
+.connectome-block h3,
 .scope-block h3,
 .raster-block h3,
 .equalizer-block h3,
-.motor-block h3,
 .log-block h3 {
   font-size: 0.75rem;
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--text-secondary);
   margin-bottom: 0.5rem;
-}
-
-#scope-canvas,
-#raster-canvas {
-  display: block;
-  width: 100%;
-  height: auto;
-  background: #04060a;
-  border: 1px solid var(--border);
-  border-radius: 6px;
 }
 
 .block-heading-row {
@@ -312,13 +297,60 @@ canvas:focus-visible,
   margin-bottom: 0;
 }
 
-.telemetry-rate {
+.backend-label {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--text-secondary);
+}
+
+.progress-track {
+  width: 100%;
+  height: 8px;
+  border-radius: 999px;
+  background: #04060a;
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, var(--cyan), var(--emerald));
+  transition: width var(--transition-fast);
+}
+
+.progress-text {
+  margin-top: 0.4rem;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--text-muted);
+}
+
+.telemetry-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--gap);
+}
+
+#scope-canvas,
+#raster-canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: #04060a;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.telemetry-rate,
+.spikes-rate {
   font-family: var(--font-mono);
   font-size: 0.75rem;
   color: var(--emerald);
+  margin-top: 0.4rem;
 }
 
-/* Equalizer -------------------------------------------------------------- */
+/* Equalizer ----------------------------------------------------------------- */
 
 .equalizer {
   display: flex;
@@ -340,38 +372,7 @@ canvas:focus-visible,
   transition: height 90ms ease-out;
 }
 
-/* Motor controls --------------------------------------------------------- */
-
-.motor-controls {
-  display: flex;
-  flex-direction: column;
-  gap: 0.65rem;
-}
-
-.motor-control {
-  display: grid;
-  grid-template-columns: 4.5rem 1fr;
-  align-items: center;
-  gap: 0.6rem;
-  font-size: 0.8rem;
-  color: var(--text-secondary);
-}
-
-.motor-control-label {
-  font-family: var(--font-mono);
-  text-transform: uppercase;
-  font-size: 0.7rem;
-  letter-spacing: 0.05em;
-}
-
-.motor-control input[type='range'] {
-  width: 100%;
-  accent-color: var(--gold);
-  height: 1.4rem;
-  cursor: pointer;
-}
-
-/* Event log --------------------------------------------------------------- */
+/* Event log ------------------------------------------------------------------ */
 
 .log-block {
   flex: 1;
@@ -403,43 +404,23 @@ canvas:focus-visible,
   content: none;
 }
 
-/* World panel ------------------------------------------------------------- */
+/* Game panel ------------------------------------------------------------------ */
 
-.panel-world .panel-header {
+.panel-game .panel-header {
   align-items: center;
 }
 
-.chapter-name {
+.status-text {
   font-family: var(--font-mono);
-  font-size: 0.95rem;
-  color: var(--gold);
-  text-shadow: 0 0 10px rgba(255, 183, 3, 0.35);
+  font-size: 0.75rem;
+  color: var(--text-secondary);
 }
 
-.chapter-controls {
-  display: flex;
-  gap: 0.4rem;
+.status-text[data-state='error'] {
+  color: var(--danger);
 }
 
-.chapter-btn {
-  background: var(--bg-raised);
-  border: 1px solid var(--border);
-  color: var(--text-primary);
-  border-radius: 8px;
-  padding: 0.35rem 0.7rem;
-  cursor: pointer;
-  font-size: 0.85rem;
-  line-height: 1;
-  transition: border-color var(--transition-fast), color var(--transition-fast);
-}
-
-.chapter-btn:hover {
-  border-color: var(--border-strong);
-  color: var(--cyan);
-}
-
-.chapter-btn[aria-pressed='true'] {
-  border-color: var(--emerald);
+.status-text[data-state='ready'] {
   color: var(--emerald);
 }
 
@@ -461,106 +442,180 @@ canvas:focus-visible,
   height: auto;
 }
 
-.phone-hud {
+.hud {
   position: absolute;
   top: 0.75rem;
+  left: 0.75rem;
   right: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
   pointer-events: none;
 }
 
-.phone-hud-frame {
+.hud-row {
   display: flex;
-  align-items: center;
   gap: 0.5rem;
-  background: rgba(7, 9, 15, 0.65);
+  flex-wrap: wrap;
+}
+
+.hud-counter {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  background: rgba(7, 9, 15, 0.68);
   border: 1px solid var(--border-strong);
-  border-radius: 999px;
-  padding: 0.3rem 0.65rem;
-  font-family: var(--font-mono);
-  font-size: 0.65rem;
+  border-radius: var(--radius-md);
+  padding: 0.4rem 0.7rem;
   backdrop-filter: blur(4px);
+  min-width: 8rem;
 }
 
-.hud-rec {
-  color: var(--danger);
-}
-
-.hud-rec::before {
-  content: '';
-}
-
-.hud-battery {
+.hud-counter-label {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
   color: var(--text-secondary);
 }
 
-.caption {
+.hud-counter-value {
+  font-family: var(--font-mono);
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--gold);
+}
+
+.hud-meters {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  max-width: 16rem;
+}
+
+.hud-meter {
+  display: grid;
+  grid-template-columns: 3.6rem 1fr 3rem;
+  align-items: center;
+  gap: 0.5rem;
+  background: rgba(7, 9, 15, 0.68);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 0.3rem 0.6rem;
+  backdrop-filter: blur(4px);
+}
+
+.hud-meter-label {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.meter-track {
+  height: 8px;
+  border-radius: 999px;
+  background: #04060a;
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.meter-fill {
+  height: 100%;
+  width: 0%;
+  transition: width 150ms ease-out;
+}
+
+.meter-fill-fatigue {
+  background: linear-gradient(90deg, var(--emerald), var(--gold));
+}
+
+.meter-fill-anger {
+  background: linear-gradient(90deg, var(--gold), var(--danger));
+}
+
+.hud-meter-value {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--text-secondary);
+  text-align: right;
+}
+
+.subtitle {
   position: absolute;
   left: 50%;
   bottom: 0.9rem;
   transform: translateX(-50%);
   max-width: 90%;
+  min-height: 1.4rem;
   text-align: center;
   background: rgba(7, 9, 15, 0.72);
   border: 1px solid var(--border);
-  color: var(--text-primary);
+  color: var(--gold);
   font-size: 0.85rem;
   padding: 0.4rem 0.9rem;
   border-radius: 999px;
   backdrop-filter: blur(3px);
 }
 
-.chapter-list {
+.subtitle:empty {
+  display: none;
+}
+
+/* Comment feed side log -------------------------------------------------------- */
+
+.comment-log-block {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 0.75rem;
+  background: var(--bg-raised);
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.comment-log-block h3 {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+  margin-bottom: 0.5rem;
+}
+
+.comment-log {
   list-style: none;
   margin: 0;
   padding: 0;
-  display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  gap: 0.5rem;
-  font-size: 0.72rem;
-  color: var(--text-muted);
+  overflow-y: auto;
+  max-height: 11rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+  color: var(--text-primary);
 }
 
-.chapter-item {
-  display: block;
-  width: 100%;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 0.4rem 0.5rem;
-  text-align: center;
-  background: var(--bg-raised);
-  color: var(--text-muted);
-  font: inherit;
-  font-size: 0.72rem;
-  cursor: pointer;
-  transition: border-color var(--transition-fast), color var(--transition-fast);
+.comment-log li {
+  border-left: 2px solid var(--gold);
+  padding-left: 0.5rem;
 }
 
-.chapter-item:hover {
-  border-color: var(--border-strong);
+.comment-log .comment-nick {
   color: var(--cyan);
-}
-
-.chapter-item[aria-current='true'],
-.chapter-item.is-active {
-  border-color: var(--gold);
-  color: var(--gold);
-}
-
-.status-text {
+  font-weight: 600;
   font-family: var(--font-mono);
-  font-size: 0.75rem;
-  color: var(--text-secondary);
+  font-size: 0.7rem;
+  display: block;
 }
 
-.status-text[data-state='error'] {
-  color: var(--danger);
+.comment-log .comment-likes {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
 }
 
-.status-text[data-state='ready'] {
-  color: var(--emerald);
-}
-
-/* Footer ------------------------------------------------------------------ */
+/* Footer ------------------------------------------------------------------------ */
 
 .app-footer {
   padding: 0.6rem clamp(1rem, 3vw, 2rem);
@@ -570,7 +625,7 @@ canvas:focus-visible,
   text-align: center;
 }
 
-/* Loading / error overlays ------------------------------------------------ */
+/* Loading / error overlays ------------------------------------------------------- */
 
 .loading-screen {
   position: fixed;
@@ -630,7 +685,7 @@ canvas:focus-visible,
   display: none;
 }
 
-/* Responsive: stack panels on small screens ------------------------------- */
+/* Responsive: stack panels on small screens --------------------------------------- */
 
 @media (max-width: 900px) {
   .split-screen {
@@ -645,8 +700,8 @@ canvas:focus-visible,
     flex-wrap: wrap;
   }
 
-  .chapter-list {
-    grid-template-columns: repeat(3, 1fr);
+  .hud-meters {
+    max-width: none;
   }
 }
 
@@ -655,16 +710,16 @@ canvas:focus-visible,
     padding: 0.85rem;
   }
 
-  .motor-control {
-    grid-template-columns: 3.6rem 1fr;
+  .hud-meter {
+    grid-template-columns: 3rem 1fr 2.6rem;
   }
 
-  .chapter-list {
-    grid-template-columns: repeat(2, 1fr);
+  .hud-counter {
+    min-width: 6.5rem;
   }
 }
 
-/* Reduced motion ----------------------------------------------------------- */
+/* Reduced motion --------------------------------------------------------------------- */
 
 @media (prefers-reduced-motion: reduce) {
   * {
