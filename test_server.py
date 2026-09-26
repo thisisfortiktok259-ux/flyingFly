@@ -3,8 +3,8 @@
 
 These tests spin up the real server on an ephemeral port and exercise input
 validation, static-file routing, and safety guarantees. They do not require
-network access to Gemini or Hugging Face: Gemini and Hugging Face calls are
-mocked where behavior depends on them (see GeminiMockedTestCase and
+network access to Hugging Face: all outbound fetches are mocked where
+behavior depends on them (see DataProxyTestCase and
 NeuronSampleMockedTestCase); everything else only exercises code paths that
 run before any outbound call, or checks correct error handling when an
 upstream is genuinely unreachable (no assertion requires live internet
@@ -13,11 +13,14 @@ access to pass).
 Run with: python3 -m unittest test_server.py -v
 """
 import gzip
+import hashlib
 import json
+import tempfile
 import threading
 import unittest
 import urllib.error
 import urllib.request
+from pathlib import Path
 from unittest import mock
 
 import server as srv
@@ -102,6 +105,27 @@ class ServerTestCase(unittest.TestCase):
         self.assertIn("javascript", content_type or "")
         self.assertTrue(len(body) > 0)
 
+    @unittest.skipUnless(
+        (srv.BASE_DIR / "neuro_sim.js").exists(),
+        "neuro_sim.js not present yet (owned by another in-progress change)",
+    )
+    def test_neuro_sim_js_serves_when_present(self):
+        status, content_type, body = self._get("/neuro_sim.js")
+        self.assertEqual(status, 200)
+        self.assertIn("javascript", content_type or "")
+        self.assertTrue(len(body) > 0)
+
+    def test_neuro_sim_js_route_is_a_plain_404_when_file_missing(self):
+        """neuro_sim.js is on the static allowlist even before the file
+        exists in the repo (another change may add it); until it exists,
+        requesting it must be an ordinary 404, not a crash.
+        """
+        if (srv.BASE_DIR / "neuro_sim.js").exists():
+            self.skipTest("neuro_sim.js already exists; covered by the serves-when-present test")
+        status, payload = self._get_json("/neuro_sim.js")
+        self.assertEqual(status, 404)
+        self.assertIn("error", payload)
+
     def test_root_with_querystring_still_serves(self):
         status, content_type, body = self._get("/?v=123")
         self.assertEqual(status, 200)
@@ -119,38 +143,20 @@ class ServerTestCase(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertIn("error", payload)
 
-    def test_chat_rejects_unknown_npc(self):
-        status, payload = self._post_json("/api/chat", {"npc": "Неизвестный", "message": "Привет"})
-        self.assertEqual(status, 400)
-        self.assertIn("error", payload)
-
-    def test_chat_rejects_empty_message(self):
-        status, payload = self._post_json("/api/chat", {"npc": "Зина", "message": "   "})
-        self.assertEqual(status, 400)
-        self.assertIn("error", payload)
-
-    def test_chat_rejects_oversized_message(self):
-        status, payload = self._post_json(
-            "/api/chat", {"npc": "Зина", "message": "a" * (srv.MAX_MESSAGE_LEN + 1)}
-        )
-        self.assertEqual(status, 400)
-        self.assertIn("error", payload)
-
-    def test_chat_rejects_missing_fields(self):
-        status, payload = self._post_json("/api/chat", {})
-        self.assertEqual(status, 400)
-        self.assertIn("error", payload)
-
-    def test_chat_rejects_oversized_body_413(self):
-        """Regression test: a JSON body larger than MAX_CHAT_BODY_BYTES must
-        be rejected with 413 before any JSON parsing or Gemini call is
-        attempted (Content-Length is checked first in _handle_chat).
+    def test_chat_route_removed_returns_404(self):
+        """Gemini chat has been removed entirely; POST /api/chat (and any
+        other POST route) must now be a plain 404, not a crash and not a
+        500 (do_POST's fallback previously called _send_error_json without
+        self, which raised NameError and was masked by an outer except
+        turning it into a 500; that bug is fixed as part of this removal).
         """
-        huge_message = "a" * (srv.MAX_CHAT_BODY_BYTES + 500)
-        body = json.dumps({"npc": "Зина", "message": huge_message}).encode("utf-8")
-        self.assertGreater(len(body), srv.MAX_CHAT_BODY_BYTES)
-        status, payload = self._post_raw("/api/chat", body)
-        self.assertEqual(status, 413)
+        status, payload = self._post_json("/api/chat", {"npc": "x", "message": "hi"})
+        self.assertEqual(status, 404)
+        self.assertIn("error", payload)
+
+    def test_any_post_route_is_404(self):
+        status, payload = self._post_json("/anything", {})
+        self.assertEqual(status, 404)
         self.assertIn("error", payload)
 
     def test_mesh_path_rejects_traversal(self):
@@ -161,10 +167,6 @@ class ServerTestCase(unittest.TestCase):
         status, payload = self._get_json("/assets/body/meshes/evil.py")
         self.assertEqual(status, 400)
         self.assertIn("error", payload)
-
-    def test_personas_cover_required_npcs(self):
-        expected = {"Зина", "Артем", "Григорий", "Петрович", "Барсик", "Даня"}
-        self.assertEqual(set(srv.NPC_PERSONAS.keys()), expected)
 
     # -- safety: never serve project/config files ---------------------------
 
@@ -181,115 +183,142 @@ class ServerTestCase(unittest.TestCase):
             self.assertEqual(status, 404, f"expected 404 for {path}")
 
 
-class _FakeHTTPResponse:
-    """Minimal context-manager stand-in for urllib.request.urlopen()'s return
-    value, used to mock successful Gemini responses without any network
-    access."""
-
-    def __init__(self, payload_bytes):
-        self._payload = payload_bytes
-
-    def read(self):
-        return self._payload
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc_info):
-        return False
-
-
-class GeminiMockedTestCase(unittest.TestCase):
-    """call_gemini() tests with urllib.request.urlopen mocked out: no real
-    network call to Google is made."""
+class DataProxyTestCase(ServerTestCase):
+    """Tests for /data/manifest.json and /data/<file>, with all Hugging Face
+    fetches mocked via srv._http_get -- no real network access is made, and
+    the on-disk cache is redirected to a temp directory for isolation."""
 
     def setUp(self):
-        self._orig_key = srv.GEMINI_API_KEY
-        srv.GEMINI_API_KEY = "test-secret-key-should-never-leak"
+        self._tmp_cache = tempfile.TemporaryDirectory()
+        self._orig_cache_dir = srv.CACHE_DIR
+        srv.CACHE_DIR = Path(self._tmp_cache.name)
 
     def tearDown(self):
-        srv.GEMINI_API_KEY = self._orig_key
+        srv.CACHE_DIR = self._orig_cache_dir
+        self._tmp_cache.cleanup()
 
-    def test_request_payload_uses_camelcase_system_instruction(self):
-        captured = {}
+    @staticmethod
+    def _manifest(part_file="offsets-000.bin.gz", part_bytes=None, part_sha256=None):
+        return {
+            "dataset": "MaleCNS v1.0",
+            "neurons": 166700,
+            "edges": 25582938,
+            "metadata": "neurons.json.gz",
+            "metadataColumns": [
+                "bodyId", "type", "superclass", "side", "consensusNT", "fastSign",
+                "somaLocation8nm",
+            ],
+            "arrays": [
+                {
+                    "name": "offsets",
+                    "length": 166701,
+                    "parts": [
+                        {"file": part_file, "bytes": part_bytes, "sha256": part_sha256}
+                    ],
+                },
+            ],
+        }
 
-        def fake_urlopen(req, timeout=None):
-            captured["body"] = json.loads(req.data.decode("utf-8"))
-            captured["url"] = req.full_url
-            reply = {"candidates": [{"content": {"parts": [{"text": "Привет!"}]}}]}
-            return _FakeHTTPResponse(json.dumps(reply).encode("utf-8"))
+    def test_manifest_route_serves_bytes_as_is(self):
+        manifest = self._manifest()
+        manifest_bytes = json.dumps(manifest).encode("utf-8")
+        with mock.patch.object(srv, "_http_get", return_value=manifest_bytes):
+            status, content_type, body = self._get("/data/manifest.json")
+        self.assertEqual(status, 200)
+        self.assertIn("json", (content_type or "").lower())
+        self.assertEqual(json.loads(body), manifest)
 
-        with mock.patch.object(srv.urllib.request, "urlopen", side_effect=fake_urlopen):
-            text = srv.call_gemini("persona", "hi")
+    def test_allowlisted_metadata_file_is_served(self):
+        manifest = self._manifest()
+        manifest_bytes = json.dumps(manifest).encode("utf-8")
+        gz_bytes = gzip.compress(b"[]")
 
-        self.assertEqual(text, "Привет!")
-        self.assertIn("systemInstruction", captured["body"])
-        self.assertNotIn("system_instruction", captured["body"])
-        self.assertEqual(
-            captured["body"]["systemInstruction"]["parts"][0]["text"], "persona"
+        def fake_http_get(url):
+            if url.endswith("manifest.json"):
+                return manifest_bytes
+            return gz_bytes
+
+        with mock.patch.object(srv, "_http_get", side_effect=fake_http_get):
+            status, content_type, body = self._get("/data/neurons.json.gz")
+        self.assertEqual(status, 200)
+        self.assertEqual(content_type, "application/octet-stream")
+        self.assertEqual(body, gz_bytes)
+
+    def test_allowlisted_array_part_is_verified_and_served(self):
+        part_bytes = b"fake-offsets-part-data"
+        digest = hashlib.sha256(part_bytes).hexdigest()
+        manifest = self._manifest(
+            part_file="offsets-000.bin.gz", part_bytes=len(part_bytes), part_sha256=digest
         )
-        self.assertEqual(
-            captured["body"]["contents"][0]["parts"][0]["text"], "hi"
-        )
+        manifest_bytes = json.dumps(manifest).encode("utf-8")
 
-    def test_missing_api_key_rejected_before_any_network_call(self):
-        srv.GEMINI_API_KEY = ""
-        with mock.patch.object(srv.urllib.request, "urlopen") as mocked:
-            with self.assertRaises(srv.ChatError) as ctx:
-                srv.call_gemini("persona", "hi")
+        def fake_http_get(url):
+            if url.endswith("manifest.json"):
+                return manifest_bytes
+            return part_bytes
+
+        with mock.patch.object(srv, "_http_get", side_effect=fake_http_get):
+            status, content_type, body = self._get("/data/offsets-000.bin.gz")
+        self.assertEqual(status, 200)
+        self.assertEqual(content_type, "application/octet-stream")
+        self.assertEqual(body, part_bytes)
+        cached_path = srv.CACHE_DIR / "data" / "offsets-000.bin.gz"
+        self.assertTrue(cached_path.exists())
+        self.assertEqual(cached_path.read_bytes(), part_bytes)
+
+    def test_non_manifest_filename_is_404(self):
+        manifest = self._manifest()
+        manifest_bytes = json.dumps(manifest).encode("utf-8")
+        with mock.patch.object(srv, "_http_get", return_value=manifest_bytes):
+            status, payload = self._get_json("/data/not-a-real-part.bin.gz")
+        self.assertEqual(status, 404)
+        self.assertIn("error", payload)
+
+    def test_traversal_filename_rejected_before_any_fetch(self):
+        with mock.patch.object(srv, "_http_get") as mocked:
+            status, _, _ = self._get("/data/..%2f..%2fserver.py")
+        self.assertIn(status, (400, 404))
         mocked.assert_not_called()
-        self.assertEqual(ctx.exception.status, 500)
 
-    def test_http_error_from_gemini_never_leaks_api_key(self):
-        def fake_urlopen(req, timeout=None):
-            err = urllib.error.HTTPError(
-                req.full_url, 503, "Service Unavailable", {}, None
-            )
-            err.read = lambda: b'{"error": "upstream unavailable"}'
-            raise err
+    def test_sha256_mismatch_returns_502_and_does_not_cache(self):
+        part_bytes = b"fake-offsets-part-data"
+        wrong_digest = "0" * 64
+        manifest = self._manifest(
+            part_file="offsets-000.bin.gz", part_bytes=len(part_bytes), part_sha256=wrong_digest
+        )
+        manifest_bytes = json.dumps(manifest).encode("utf-8")
 
-        with mock.patch.object(srv.urllib.request, "urlopen", side_effect=fake_urlopen):
-            with self.assertRaises(srv.ChatError) as ctx:
-                srv.call_gemini("persona", "hi")
+        def fake_http_get(url):
+            if url.endswith("manifest.json"):
+                return manifest_bytes
+            return part_bytes
 
-        self.assertEqual(ctx.exception.status, 502)
-        self.assertNotIn("key=", ctx.exception.message)
-        self.assertNotIn(srv.GEMINI_API_KEY, ctx.exception.message)
+        with mock.patch.object(srv, "_http_get", side_effect=fake_http_get):
+            status, payload = self._get_json("/data/offsets-000.bin.gz")
+        self.assertEqual(status, 502)
+        self.assertIn("error", payload)
+        cached_path = srv.CACHE_DIR / "data" / "offsets-000.bin.gz"
+        self.assertFalse(cached_path.exists())
 
-    def test_url_error_from_gemini_never_leaks_api_key(self):
-        def fake_urlopen(req, timeout=None):
-            raise urllib.error.URLError("timed out")
+    def test_oversized_part_returns_502_and_does_not_cache(self):
+        # Declared size is tiny, so the hard-capped tolerance is exceeded by
+        # a deliberately larger download.
+        part_bytes = b"x" * 1000
+        manifest = self._manifest(
+            part_file="offsets-000.bin.gz", part_bytes=10, part_sha256=None
+        )
+        manifest_bytes = json.dumps(manifest).encode("utf-8")
 
-        with mock.patch.object(srv.urllib.request, "urlopen", side_effect=fake_urlopen):
-            with self.assertRaises(srv.ChatError) as ctx:
-                srv.call_gemini("persona", "hi")
+        def fake_http_get(url):
+            if url.endswith("manifest.json"):
+                return manifest_bytes
+            return part_bytes
 
-        self.assertEqual(ctx.exception.status, 502)
-        self.assertNotIn("key=", ctx.exception.message)
-        self.assertNotIn(srv.GEMINI_API_KEY, ctx.exception.message)
-
-    def test_blocked_response_reports_block_reason_not_shape_error(self):
-        def fake_urlopen(req, timeout=None):
-            reply = {"candidates": [], "promptFeedback": {"blockReason": "SAFETY"}}
-            return _FakeHTTPResponse(json.dumps(reply).encode("utf-8"))
-
-        with mock.patch.object(srv.urllib.request, "urlopen", side_effect=fake_urlopen):
-            with self.assertRaises(srv.ChatError) as ctx:
-                srv.call_gemini("persona", "hi")
-
-        self.assertEqual(ctx.exception.status, 502)
-        self.assertIn("SAFETY", ctx.exception.message)
-
-    def test_malformed_response_shape_raises_chat_error(self):
-        def fake_urlopen(req, timeout=None):
-            reply = {"candidates": [{"content": {}}]}
-            return _FakeHTTPResponse(json.dumps(reply).encode("utf-8"))
-
-        with mock.patch.object(srv.urllib.request, "urlopen", side_effect=fake_urlopen):
-            with self.assertRaises(srv.ChatError) as ctx:
-                srv.call_gemini("persona", "hi")
-
-        self.assertEqual(ctx.exception.status, 502)
+        with mock.patch.object(srv, "_http_get", side_effect=fake_http_get):
+            status, payload = self._get_json("/data/offsets-000.bin.gz")
+        self.assertEqual(status, 502)
+        cached_path = srv.CACHE_DIR / "data" / "offsets-000.bin.gz"
+        self.assertFalse(cached_path.exists())
 
 
 class NeuronSampleMockedTestCase(unittest.TestCase):
@@ -333,11 +362,15 @@ class NeuronSampleMockedTestCase(unittest.TestCase):
         self.assertEqual(sample["dataset"], "MaleCNS v1.0")
         self.assertEqual(sample["total"], 3)
         self.assertEqual(len(sample["points"]), 3)
+        indices = {p["index"] for p in sample["points"]}
+        self.assertEqual(indices, {0, 1, 2})
         for point in sample["points"]:
             self.assertIn("x", point)
             self.assertIn("y", point)
             self.assertIn("z", point)
+            self.assertIn("index", point)
             self.assertIn("type", point)
+            self.assertIn("superclass", point)
             self.assertIn("side", point)
             self.assertIn("nt", point)
 
@@ -361,6 +394,7 @@ class NeuronSampleMockedTestCase(unittest.TestCase):
             {
                 "bodyId": 1,
                 "type": "KCg",
+                "superclass": "Kenyon",
                 "side": "L",
                 "consensusNT": "acetylcholine",
                 "somaLocation8nm": {"x": 10, "y": 20, "z": 30},
@@ -368,6 +402,7 @@ class NeuronSampleMockedTestCase(unittest.TestCase):
             {
                 "bodyId": 2,
                 "type": "PN",
+                "superclass": "olfactory",
                 "side": "R",
                 "consensusNT": "gaba",
                 "somaLocation8nm": {"x": -10, "y": -20, "z": -30},
@@ -380,6 +415,10 @@ class NeuronSampleMockedTestCase(unittest.TestCase):
         xs = {round(p["x"], 3) for p in sample["points"]}
         expected = {round(-10 / 30, 3), round(10 / 30, 3)}
         self.assertEqual(xs, expected)
+        indices = {p["index"] for p in sample["points"]}
+        self.assertEqual(indices, {0, 1})
+        superclasses = {p["superclass"] for p in sample["points"]}
+        self.assertEqual(superclasses, {"Kenyon", "olfactory"})
 
     def test_rows_missing_soma_location_are_skipped_not_fabricated(self):
         manifest = {
@@ -398,6 +437,7 @@ class NeuronSampleMockedTestCase(unittest.TestCase):
             sample = srv._build_neuron_sample()
 
         self.assertEqual(len(sample["points"]), 1)
+        self.assertEqual(sample["points"][0]["index"], 0)
 
     def test_non_array_metadata_raises_value_error(self):
         manifest = {"dataset": "MaleCNS v1.0", "neurons": 1, "metadata": "neurons.json.gz"}
@@ -435,6 +475,7 @@ class SafeGunzipTestCase(unittest.TestCase):
         compressed = gzip.compress(original)
         with self.assertRaises(ValueError):
             srv._safe_gunzip(compressed, max_output_bytes=1024)  # 1 KiB cap
+
 
 if __name__ == "__main__":
     unittest.main()
