@@ -1,0 +1,12 @@
+# Local credentials and environment files
+.env
+.env.*
+!.env.example
+
+# Python runtime files
+__pycache__/
+*.py[cod]
+.venv/
+
+# Editor and OS files
+.DS_Store
