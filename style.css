@@ -8,8 +8,10 @@
     captions).
   Selectors below intentionally match the element IDs/classes described for
   game.js: brain-canvas, world-canvas, scope-canvas, raster-canvas,
-  equalizer, chapter-name, caption, source-label, telemetry-rate,
-  motor-walk, motor-turn, motor-escape, status, sound-toggle.
+  equalizer, chapter-name, chapter-list, chapter-prev, chapter-next,
+  chapter-autoplay, caption, source-label, telemetry-rate,
+  motor-walk, motor-turn, motor-escape, status, sound-toggle, event-log,
+  loading-screen, error-banner.
 */
 
 :root {
@@ -26,7 +28,8 @@
   --border-strong: rgba(0, 243, 255, 0.4);
   --danger: #ff5c5c;
   --font-ui: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas,
+    monospace;
   --radius-md: 10px;
   --radius-lg: 16px;
   --gap: clamp(0.75rem, 1.5vw, 1.25rem);
@@ -49,7 +52,8 @@ body {
 }
 
 body {
-  background: radial-gradient(circle at 15% 10%, rgba(0, 243, 255, 0.08), transparent 45%),
+  background: radial-gradient(circle at 15% 10%, rgba(0, 243, 255, 0.08),
+    transparent 45%),
     radial-gradient(circle at 85% 90%, rgba(255, 183, 3, 0.06), transparent 45%),
     var(--bg);
   min-height: 100vh;
@@ -97,7 +101,7 @@ button {
   left: 0;
 }
 
-/* Focus visibility (keyboard) --------------------------------------------- */
+/* Focus visibility (keyboard) ----------------------------------------- */
 
 a:focus-visible,
 button:focus-visible,
@@ -109,7 +113,7 @@ canvas:focus-visible,
   border-radius: 4px;
 }
 
-/* App shell ---------------------------------------------------------------- */
+/* App shell ------------------------------------------------------------ */
 
 .app-shell {
   display: flex;
@@ -180,7 +184,7 @@ canvas:focus-visible,
   font-size: 1rem;
 }
 
-/* Split screen layout ------------------------------------------------------ */
+/* Split screen layout --------------------------------------------------- */
 
 .split-screen {
   flex: 1;
@@ -226,13 +230,14 @@ canvas:focus-visible,
   color: var(--text-muted);
 }
 
-/* Brain panel --------------------------------------------------------------- */
+/* Brain panel ----------------------------------------------------------- */
 
 .brain-viewport {
   position: relative;
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  background: radial-gradient(circle at 50% 40%, rgba(0, 243, 255, 0.08), #050810 70%);
+  background: radial-gradient(circle at 50% 40%, rgba(0, 243, 255, 0.08),
+    #050810 70%);
   overflow: hidden;
 }
 
@@ -313,7 +318,7 @@ canvas:focus-visible,
   color: var(--emerald);
 }
 
-/* Equalizer ------------------------------------------------------------------ */
+/* Equalizer -------------------------------------------------------------- */
 
 .equalizer {
   display: flex;
@@ -335,7 +340,7 @@ canvas:focus-visible,
   transition: height 90ms ease-out;
 }
 
-/* Motor controls -------------------------------------------------------------- */
+/* Motor controls --------------------------------------------------------- */
 
 .motor-controls {
   display: flex;
@@ -366,7 +371,7 @@ canvas:focus-visible,
   cursor: pointer;
 }
 
-/* Event log -------------------------------------------------------------------- */
+/* Event log --------------------------------------------------------------- */
 
 .log-block {
   flex: 1;
@@ -398,7 +403,7 @@ canvas:focus-visible,
   content: none;
 }
 
-/* World panel ------------------------------------------------------------------ */
+/* World panel ------------------------------------------------------------- */
 
 .panel-world .panel-header {
   align-items: center;
@@ -509,18 +514,30 @@ canvas:focus-visible,
   margin: 0;
   padding: 0;
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 0.5rem;
   font-size: 0.72rem;
   color: var(--text-muted);
 }
 
 .chapter-item {
+  display: block;
+  width: 100%;
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 0.4rem 0.5rem;
   text-align: center;
   background: var(--bg-raised);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.72rem;
+  cursor: pointer;
+  transition: border-color var(--transition-fast), color var(--transition-fast);
+}
+
+.chapter-item:hover {
+  border-color: var(--border-strong);
+  color: var(--cyan);
 }
 
 .chapter-item[aria-current='true'],
@@ -543,7 +560,7 @@ canvas:focus-visible,
   color: var(--emerald);
 }
 
-/* Footer ------------------------------------------------------------------------ */
+/* Footer ------------------------------------------------------------------ */
 
 .app-footer {
   padding: 0.6rem clamp(1rem, 3vw, 2rem);
@@ -553,7 +570,7 @@ canvas:focus-visible,
   text-align: center;
 }
 
-/* Loading / error overlays -------------------------------------------------------- */
+/* Loading / error overlays ------------------------------------------------ */
 
 .loading-screen {
   position: fixed;
@@ -613,7 +630,7 @@ canvas:focus-visible,
   display: none;
 }
 
-/* Responsive: stack panels on small screens --------------------------------------- */
+/* Responsive: stack panels on small screens ------------------------------- */
 
 @media (max-width: 900px) {
   .split-screen {
@@ -629,7 +646,7 @@ canvas:focus-visible,
   }
 
   .chapter-list {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(3, 1fr);
   }
 }
 
@@ -641,9 +658,13 @@ canvas:focus-visible,
   .motor-control {
     grid-template-columns: 3.6rem 1fr;
   }
+
+  .chapter-list {
+    grid-template-columns: repeat(2, 1fr);
+  }
 }
 
-/* Reduced motion -------------------------------------------------------------------- */
+/* Reduced motion ----------------------------------------------------------- */
 
 @media (prefers-reduced-motion: reduce) {
   * {
