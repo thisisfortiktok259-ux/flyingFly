@@ -1,0 +1,29 @@
+name: Apply fixes 2
+
+on:
+  push:
+    paths:
+      - '.github/workflows/apply_fly_fixes2.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 ci_tmp/apply_fixes2.py
+      - run: |
+          mkdir -p /tmp/js-check
+          cp game.js /tmp/js-check/game.mjs
+          node --check /tmp/js-check/game.mjs
+          echo syntax-ok
+      - run: |
+          git config user.name github-actions
+          git config user.email actions@github.com
+          git add game.js
+          git commit -m "fix(game.js): typing never depends on sim health, clamp motorFactor, nosim flag, reindent"
+          git push
