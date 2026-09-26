@@ -1,10 +1,10 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ru">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Flying Fly — Neural + Street Lab</title>
-<meta name="description" content="Split-screen sci-fi lab: MaleCNS fly neuron telemetry on the left, an animated street scene on the right.">
+<title>Муха: Гневный комментатор</title>
+<meta name="description" content="Автономная 3D-муха бесконечно пишет гневные комментарии, пока жук-надзиратель не заставит её продолжать. Слева — модельная активность на реальной схеме связей MaleCNS.">
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -23,21 +23,21 @@
 </head>
 <body>
 
-<a class="skip-link" href="#main-content">Skip to main content</a>
+<a class="skip-link" href="#main-content">Перейти к основному содержимому</a>
 
 <div id="app" class="app-shell">
 
   <header class="app-header">
     <div class="brand">
-      <span class="brand-mark" aria-hidden="true">◈</span>
+      <span class="brand-mark" aria-hidden="true">&#10022;</span>
       <div class="brand-text">
-        <h1>Flying Fly</h1>
-        <p class="brand-subtitle">Neural telemetry lab &amp; street scene</p>
+        <h1>Гневный комментатор</h1>
+        <p class="brand-subtitle">Муха пишет. Жук следит. Зритель наблюдает.</p>
       </div>
     </div>
     <button id="sound-toggle" class="sound-toggle" type="button" aria-pressed="false">
-      <span class="sound-icon" aria-hidden="true">🔈</span>
-      <span class="sound-label">Enable sound</span>
+      <span class="sound-icon" aria-hidden="true">&#9834;</span>
+      <span class="sound-label">Включить звук</span>
     </button>
   </header>
 
@@ -45,106 +45,112 @@
 
     <section class="panel panel-brain" aria-labelledby="brain-panel-title">
       <div class="panel-header">
-        <h2 id="brain-panel-title">Neural telemetry</h2>
-        <p id="source-label" class="source-label">Loading data source…</p>
+        <h2 id="brain-panel-title">01 Мозг</h2>
+        <p id="source-label" class="source-label">Загрузка источника данных…</p>
       </div>
 
       <div class="brain-viewport">
-        <canvas id="brain-canvas" tabindex="0" aria-label="3D view of the MaleCNS brain and ventral nerve cord neuron positions"></canvas>
-        <p class="brain-note">
-          Real MaleCNS v1.0 connectome (166,700 brain + VNC neurons).
-          <strong>Animated activity is a modeled visualization, not measured or real firing data.</strong>
-        </p>
+        <canvas id="brain-canvas" tabindex="0" aria-label="3D-облако точек: реальные положения сомы нейронов MaleCNS, окрашенные по модельной активности"></canvas>
+      </div>
+      <p class="brain-note">
+        Реальные позиции сомы нейронов MaleCNS v1.0.
+        <strong>Активность — модельная величина, рассчитанная на реальной схеме связей MaleCNS, а не измеренные данные.</strong>
+      </p>
+
+      <div class="connectome-block">
+        <div class="block-heading-row">
+          <h3>Загрузка коннектома</h3>
+          <span id="backend-label" class="backend-label">Бэкенд: —</span>
+        </div>
+        <div class="progress-track" role="progressbar" aria-labelledby="brain-progress-text" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <div id="brain-progress-fill" class="progress-fill"></div>
+        </div>
+        <p id="brain-progress-text" class="progress-text">Ожидание…</p>
       </div>
 
       <div class="telemetry-grid">
         <div class="scope-block">
-          <h3>PAM11 oscilloscope</h3>
-          <canvas id="scope-canvas" width="320" height="110" aria-label="PAM11 oscilloscope trace, modeled activity"></canvas>
+          <h3>Осциллограф PAM</h3>
+          <canvas id="scope-canvas" width="320" height="110" aria-label="Осциллограф частоты группы PAM, рассчитанной моделью"></canvas>
+          <p id="telemetry-rate" class="telemetry-rate">-- Гц (модель)</p>
         </div>
         <div class="raster-block">
-          <h3>Spike raster</h3>
-          <canvas id="raster-canvas" width="320" height="110" aria-label="Modeled spike raster plot"></canvas>
+          <h3>Растр спайков</h3>
+          <canvas id="raster-canvas" width="320" height="110" aria-label="Растр спайков 48 нейронов симуляции коннектома"></canvas>
+          <p id="spikes-rate" class="spikes-rate">-- спайков/с</p>
         </div>
       </div>
 
       <div class="equalizer-block">
         <div class="block-heading-row">
-          <h3>Activity equalizer</h3>
-          <p id="telemetry-rate" class="telemetry-rate">-- Hz (modeled)</p>
+          <h3>Аудио-эквалайзер</h3>
         </div>
-        <div id="equalizer" class="equalizer" role="img" aria-label="28-bar modeled neural activity equalizer"></div>
-      </div>
-
-      <div class="motor-block">
-        <h3>Motor drive</h3>
-        <div class="motor-controls">
-          <label class="motor-control" for="motor-walk">
-            <span class="motor-control-label">Walk</span>
-            <input type="range" id="motor-walk" min="0" max="100" value="0" step="1" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-          </label>
-          <label class="motor-control" for="motor-turn">
-            <span class="motor-control-label">Turn</span>
-            <input type="range" id="motor-turn" min="-100" max="100" value="0" step="1" aria-valuemin="-100" aria-valuemax="100" aria-valuenow="0">
-          </label>
-          <label class="motor-control" for="motor-escape">
-            <span class="motor-control-label">Escape</span>
-            <input type="range" id="motor-escape" min="0" max="100" value="0" step="1" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-          </label>
-        </div>
+        <div id="equalizer" class="equalizer" role="img" aria-label="28-полосный эквалайзер звука клавиш и фонового шума"></div>
       </div>
 
       <div class="log-block">
-        <h3>Neuronal event log</h3>
-        <ul id="event-log" class="event-log" aria-live="polite" aria-label="Neuronal event log"></ul>
+        <h3>Журнал событий</h3>
+        <ul id="event-log" class="event-log" aria-live="polite" aria-label="Журнал событий"></ul>
       </div>
     </section>
 
-    <section class="panel panel-world" aria-labelledby="world-panel-title">
+    <section class="panel panel-game" aria-labelledby="game-panel-title">
       <div class="panel-header">
-        <h2 id="world-panel-title" class="sr-only">Street scene</h2>
-        <p id="chapter-name" class="chapter-name">Loading chapters…</p>
-        <div class="chapter-controls" role="group" aria-label="Chapter navigation">
-          <button class="chapter-btn" id="chapter-prev" type="button" aria-label="Previous chapter">‹</button>
-          <button class="chapter-btn" id="chapter-autoplay" type="button" aria-pressed="true">Auto</button>
-          <button class="chapter-btn" id="chapter-next" type="button" aria-label="Next chapter">›</button>
-        </div>
+        <h2 id="game-panel-title">02 Игра</h2>
+        <p id="status" class="status-text" role="status" aria-live="polite">Загрузка сцены…</p>
       </div>
 
       <div class="world-viewport">
-        <canvas id="world-canvas" tabindex="0" aria-label="Animated street scene: phone check, street, skateboard, and car chapters"></canvas>
+        <canvas id="world-canvas" tabindex="0" aria-label="Комната с мухой, которая печатает гневные комментарии на ноутбуке, и жуком-надзирателем"></canvas>
 
-        <div class="phone-hud" aria-hidden="true">
-          <div class="phone-hud-frame">
-            <span class="hud-rec">● REC</span>
-            <span class="hud-battery">87%</span>
+        <div class="hud" aria-hidden="true">
+          <div class="hud-row">
+            <div class="hud-counter">
+              <span class="hud-counter-label">Комментариев написано</span>
+              <span id="comments-count" class="hud-counter-value">0</span>
+            </div>
+            <div class="hud-counter">
+              <span class="hud-counter-label">Раз заставили</span>
+              <span id="forced-count" class="hud-counter-value">0</span>
+            </div>
+          </div>
+          <div class="hud-meters">
+            <div class="hud-meter">
+              <span class="hud-meter-label">Усталость</span>
+              <div class="meter-track">
+                <div id="fatigue-fill" class="meter-fill meter-fill-fatigue"></div>
+              </div>
+              <span id="fatigue-value" class="hud-meter-value">0%</span>
+            </div>
+            <div class="hud-meter">
+              <span class="hud-meter-label">Гнев</span>
+              <div class="meter-track">
+                <div id="anger-fill" class="meter-fill meter-fill-anger"></div>
+              </div>
+              <span id="anger-value" class="hud-meter-value">0%</span>
+            </div>
           </div>
         </div>
 
-        <p id="caption" class="caption" aria-live="polite">&lt;...&gt;</p>
+        <p id="subtitle" class="subtitle" aria-live="polite"></p>
       </div>
 
-      <ol id="chapter-list" class="chapter-list" aria-label="Chapters">
-        <li><button class="chapter-item" type="button" data-chapter-key="phone">1. Phone check</button></li>
-        <li><button class="chapter-item" type="button" data-chapter-key="street">2. Street cruise</button></li>
-        <li><button class="chapter-item" type="button" data-chapter-key="skate">3. Skate spot</button></li>
-        <li><button class="chapter-item" type="button" data-chapter-key="car">4. Compact car</button></li>
-        <li><button class="chapter-item" type="button" data-chapter-key="podium">5. Podium moment</button></li>
-      </ol>
-
-      <p id="status" class="status-text" role="status" aria-live="polite">Loading scene…</p>
+      <div class="comment-log-block">
+        <h3>Лента комментариев</h3>
+        <ul id="comment-log" class="comment-log" aria-live="polite" aria-label="Лента написанных комментариев"></ul>
+      </div>
     </section>
 
   </main>
 
   <footer class="app-footer">
-    <p>Neuron positions are real MaleCNS v1.0 soma coordinates. No firing rates or neural simulation are computed or claimed.</p>
+    <p>Нейронные позиции — реальные координаты сомы MaleCNS v1.0. Активность мозга и жук-надзиратель — модельные и процедурные элементы; ИИ-диалогов и внешних языковых моделей в этой версии нет.</p>
   </footer>
 </div>
 
 <div id="loading-screen" class="loading-screen" role="status" aria-live="polite">
   <div class="loading-spinner" aria-hidden="true"></div>
-  <p class="loading-text">Loading assets…</p>
+  <p id="loading-text" class="loading-text">Загрузка ресурсов…</p>
 </div>
 
 <div id="error-banner" class="error-banner" role="alert" hidden></div>
