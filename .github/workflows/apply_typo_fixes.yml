@@ -23,85 +23,53 @@ jobs:
         run: |
           cat > /tmp/typos.py <<'PY'
           # -*- coding: utf-8 -*-
-          import io, re, sys
+          import io, sys
 
           PATH = 'game.js'
+
+          # Plain substring anchors, every one confirmed verbatim against the
+          # checked-out file by the diagnostic run. Each must match exactly once.
+          EDITS = [
+              (u'\u0432\u043e\u0437\u0430\u0447\u043d\u043e',
+               u'\u0432\u043e\u0437\u043c\u0443\u0442\u0438\u0442\u0435\u043b\u044c\u043d\u043e',
+               'vozachno -> vozmutitelno (not a Russian word)'),
+              (u'\u0438\u0438\u043c\u0435\u043d\u043d\u043e',
+               u'\u0438\u043c\u0435\u043d\u043d\u043e',
+               'iimenno -> imenno (doubled initial letter)'),
+              (u'\u041c\u041e\u0418 \u0421\u0410\u0425\u0410\u0420',
+               u'\u041c\u041e\u0419 \u0421\u0410\u0425\u0410\u0420',
+               'MOI SAHAR -> MOJ SAHAR (wrong possessive form)'),
+              (u'\u0441\u043a\u0440\u0438\u0447\u0430\u0449\u0430\u044f',
+               u'\u0441\u043a\u0440\u0438\u043f\u044f\u0449\u0430\u044f',
+               'skrichashchaya -> skripyashchaya (creaking door)'),
+              (u'\u041f\u041e\u0417\u041e\u0440!',
+               u'\u041f\u041e\u0417\u041e\u0420!',
+               'POZOr -> POZOR (stray lowercase letter in shouted word)'),
+              (u'\u044f \u0434\u0430\u0436\u0435 \u043d\u0435 '
+               u'\u0443\u0441\u043f\u0435\u043b '
+               u'\u0440\u0430\u0437\u043e\u0437\u043b\u0438\u0442\u044c\u0441\u044f',
+               u'\u044f \u0434\u0430\u0436\u0435 \u043d\u0435 '
+               u'\u0443\u0441\u043f\u0435\u043b\u0430 '
+               u'\u0440\u0430\u0437\u043e\u0437\u043b\u0438\u0442\u044c\u0441\u044f',
+               'uspel -> uspela (narrator is muha, feminine)'),
+              (u'${s} \u0434\u043e\u0432\u0435\u043b\u043e \u043c\u0435\u043d\u044f '
+               u'\u0434\u043e \u043f\u0440\u0435\u0434\u0435\u043b\u0430',
+               u'${s} \u2014 \u044d\u0442\u043e \u0434\u043e\u0432\u0435\u043b\u043e '
+               u'\u043c\u0435\u043d\u044f \u0434\u043e '
+               u'\u043f\u0440\u0435\u0434\u0435\u043b\u0430',
+               'neuter "dovelo" disagreed with non-neuter subjects; anchored to "eto"'),
+          ]
 
           with io.open(PATH, 'r', encoding='utf-8', newline='') as f:
               text = f.read()
 
-          # ---------- diagnostics: dump exact context for the tricky strings ----
-          def dump(needle, label):
-              print('--- context for %s ---' % label)
-              start = 0
-              found = False
-              while True:
-                  i = text.find(needle, start)
-                  if i < 0:
-                      break
-                  found = True
-                  print(repr(text[max(0, i - 90):i + 60]))
-                  start = i + 1
-              if not found:
-                  print('(not found)')
-
-          dump(u'\u0440\u0430\u0437\u043e\u0437\u043b\u0438\u0442\u044c\u0441\u044f',
-               'razozlitsya')
-          dump(u'\u043f\u0440\u0435\u0434\u0435\u043b\u0430', 'predela')
-
           failures = []
-
-          # ---------- plain substring edits (all five confirmed by run #1) ------
-          PLAIN = [
-              (u'\u0432\u043e\u0437\u0430\u0447\u043d\u043e',
-               u'\u0432\u043e\u0437\u043c\u0443\u0442\u0438\u0442\u0435\u043b\u044c\u043d\u043e',
-               'vozachno -> vozmutitelno'),
-              (u'\u0438\u0438\u043c\u0435\u043d\u043d\u043e',
-               u'\u0438\u043c\u0435\u043d\u043d\u043e',
-               'iimenno -> imenno'),
-              (u'\u041c\u041e\u0418 \u0421\u0410\u0425\u0410\u0420',
-               u'\u041c\u041e\u0419 \u0421\u0410\u0425\u0410\u0420',
-               'MOI SAHAR -> MOJ SAHAR'),
-              (u'\u0441\u043a\u0440\u0438\u0447\u0430\u0449\u0430\u044f',
-               u'\u0441\u043a\u0440\u0438\u043f\u044f\u0449\u0430\u044f',
-               'skrichashchaya -> skripyashchaya'),
-              (u'\u041f\u041e\u0417\u041e\u0440!',
-               u'\u041f\u041e\u0417\u041e\u0420!',
-               'POZOr -> POZOR'),
-          ]
-
-          for old, new, why in PLAIN:
+          for old, new, why in EDITS:
               n = text.count(old)
               if n != 1:
                   failures.append('%s: %d matches, expected 1' % (why, n))
                   continue
               text = text.replace(old, new, 1)
-              print('patched: %s' % why)
-
-          # ---------- form-agnostic regex edits --------------------------------
-          # Insert the missing negation whatever the verb form is, and never
-          # twice (negative lookahead on "ne ").
-          REGEX = [
-              (u'(\u044f \u0434\u0430\u0436\u0435 )(?!\u043d\u0435 )(\\S+)'
-               u'( \u0440\u0430\u0437\u043e\u0437\u043b\u0438\u0442\u044c\u0441\u044f)',
-               u'\\1\u043d\u0435 \\2\\3',
-               'insert missing negation before "uspel/uspela razozlitsya"'),
-              # Neuter "dovelo" disagreed with non-neuter subjects; anchor it to
-              # a neuter "eto" so every subject reads correctly.
-              (u'(\\$\\{s\\}) (\u0434\u043e\u0432\u0435\u043b[\u043e\u0430]) '
-               u'(\u043c\u0435\u043d\u044f \u0434\u043e '
-               u'\u043f\u0440\u0435\u0434\u0435\u043b\u0430)',
-               u'\\1 \u2014 \u044d\u0442\u043e '
-               u'\u0434\u043e\u0432\u0435\u043b\u043e \\3',
-               'gender agreement: "${s} dovelo" -> "${s} - eto dovelo"'),
-          ]
-
-          for pat, repl, why in REGEX:
-              new_text, n = re.subn(pat, repl, text, count=1)
-              if n != 1:
-                  failures.append('%s: %d matches, expected 1' % (why, n))
-                  continue
-              text = new_text
               print('patched: %s' % why)
 
           if failures:
@@ -130,5 +98,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add game.js
-          git commit -m "fix(game.js): correct Russian typos and agreement in user-visible comment/beetle strings"
+          git commit -m "fix(game.js): correct Russian spelling and agreement in user-visible comment strings"
           git push
