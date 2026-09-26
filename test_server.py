@@ -2,11 +2,11 @@
 """Minimal stdlib tests for server.py.
 
 These tests spin up the real server on an ephemeral port and exercise input
-validation and routing. They do not require network access to Gemini or
-Hugging Face: Gemini-dependent behavior is only smoke-tested for the
-validation errors that happen before any outbound call, and asset/neuron
-endpoints are checked only for correct error handling when unreachable is
-acceptable (no assertions require live internet access to pass).
+validation, static-file routing, and safety guarantees. They do not require
+network access to Gemini or Hugging Face: Gemini-dependent behavior is only
+smoke-tested for the validation errors that happen before any outbound call,
+and asset/neuron endpoints are checked only for correct error handling when
+unreachable (no assertions require live internet access to pass).
 
 Run with: python3 -m unittest test_server.py -v
 """
@@ -38,9 +38,13 @@ class ServerTestCase(unittest.TestCase):
     def _get(self, path):
         try:
             with urllib.request.urlopen(self._url(path), timeout=10) as resp:
-                return resp.status, json.loads(resp.read().decode("utf-8"))
+                return resp.status, resp.getheader("Content-Type"), resp.read()
         except urllib.error.HTTPError as exc:
-            return exc.code, json.loads(exc.read().decode("utf-8"))
+            return exc.code, exc.headers.get("Content-Type"), exc.read()
+
+    def _get_json(self, path):
+        status, _, body = self._get(path)
+        return status, json.loads(body.decode("utf-8"))
 
     def _post_json(self, path, payload):
         body = json.dumps(payload).encode("utf-8")
@@ -53,13 +57,53 @@ class ServerTestCase(unittest.TestCase):
         except urllib.error.HTTPError as exc:
             return exc.code, json.loads(exc.read().decode("utf-8"))
 
+    # -- static frontend routes ---------------------------------------------
+
+    def test_root_serves_index_html(self):
+        status, content_type, body = self._get("/")
+        self.assertEqual(status, 200)
+        self.assertIn("text/html", content_type or "")
+        text = body.decode("utf-8", "replace").lower()
+        self.assertTrue(text.startswith("<!doctype html") or "<html" in text)
+
+    def test_index_html_route_serves_same_file(self):
+        status, content_type, body = self._get("/index.html")
+        self.assertEqual(status, 200)
+        self.assertIn("text/html", content_type or "")
+        self.assertTrue(len(body) > 0)
+
+    def test_style_css_serves(self):
+        status, content_type, body = self._get("/style.css")
+        self.assertEqual(status, 200)
+        self.assertIn("text/css", content_type or "")
+        self.assertTrue(len(body) > 0)
+
+    def test_game_js_serves(self):
+        status, content_type, body = self._get("/game.js")
+        self.assertEqual(status, 200)
+        self.assertIn("javascript", content_type or "")
+        self.assertTrue(len(body) > 0)
+
+    def test_fly_rig_js_serves(self):
+        status, content_type, body = self._get("/fly_rig.js")
+        self.assertEqual(status, 200)
+        self.assertIn("javascript", content_type or "")
+        self.assertTrue(len(body) > 0)
+
+    def test_root_with_querystring_still_serves(self):
+        status, content_type, body = self._get("/?v=123")
+        self.assertEqual(status, 200)
+        self.assertIn("text/html", content_type or "")
+
+    # -- API routes -----------------------------------------------------------
+
     def test_health(self):
-        status, payload = self._get("/api/health")
+        status, payload = self._get_json("/api/health")
         self.assertEqual(status, 200)
         self.assertEqual(payload.get("status"), "ok")
 
     def test_unknown_route_404(self):
-        status, payload = self._get("/nope")
+        status, payload = self._get_json("/nope")
         self.assertEqual(status, 404)
         self.assertIn("error", payload)
 
@@ -86,22 +130,31 @@ class ServerTestCase(unittest.TestCase):
         self.assertIn("error", payload)
 
     def test_mesh_path_rejects_traversal(self):
-        status, payload = self._get("/assets/body/meshes/..%2f..%2fserver.py")
+        status, _, _ = self._get("/assets/body/meshes/..%2f..%2fserver.py")
         self.assertIn(status, (400, 404))
 
     def test_mesh_path_rejects_bad_extension(self):
-        status, payload = self._get("/assets/body/meshes/evil.py")
+        status, payload = self._get_json("/assets/body/meshes/evil.py")
         self.assertEqual(status, 400)
         self.assertIn("error", payload)
-
-    def test_env_file_not_served(self):
-        for path in ("/.env", "/.env.example", "/server.py"):
-            status, _ = self._get(path)
-            self.assertEqual(status, 404)
 
     def test_personas_cover_required_npcs(self):
         expected = {"Зина", "Артем", "Григорий", "Петрович", "Барсик", "Даня"}
         self.assertEqual(set(srv.NPC_PERSONAS.keys()), expected)
+
+    # -- safety: never serve project/config files ---------------------------
+
+    def test_env_and_source_files_not_served(self):
+        for path in (
+            "/.env",
+            "/.env.example",
+            "/server.py",
+            "/test_server.py",
+            "/.gitignore",
+            "/README.md",
+        ):
+            status, _, _ = self._get(path)
+            self.assertEqual(status, 404, f"expected 404 for {path}")
 
 
 if __name__ == "__main__":
