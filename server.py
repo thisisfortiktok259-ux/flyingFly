@@ -25,6 +25,9 @@ Runs on port 8085 by default and exposes:
       Sends a persona-flavored prompt to Google Gemini (generateContent) and
       returns {"npc": ..., "reply": ...}. All chat output is model-generated
       text; it is not scripted dialogue and is not validated game content.
+      Errors from Gemini are surfaced as sanitized JSON; the API key (sent as
+      a URL query parameter to Gemini) is never included in any response,
+      error message, or log line.
 
   GET  /assets/body/model.json
   GET  /assets/body/meshes/<filename>.stl
@@ -45,7 +48,9 @@ Runs on port 8085 by default and exposes:
       per-row shape of neurons.json.gz (list-of-lists vs list-of-objects) is
       not fully confirmed from the published manifest alone; this code
       handles both shapes defensively and only emits points it can actually
-      parse from the real source data, never fabricated ones.
+      parse from the real source data, never fabricated ones. Downloaded and
+      decompressed data is size-capped (see MAX_* constants below) so a
+      corrupted or hostile upstream response cannot exhaust memory.
 
 Configuration (read from a local .env file or the real process environment,
 process environment wins if both are set):
@@ -71,6 +76,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -135,6 +141,16 @@ HTTP_TIMEOUT = 20  # seconds, applies to every outbound fetch (HF + Gemini)
 NEURON_SAMPLE_SIZE = 16000
 MAX_CHAT_BODY_BYTES = 4096
 MAX_MESSAGE_LEN = 500
+
+# Sanity caps on untrusted upstream data. These are deliberately generous for
+# the real MaleCNS v1.0 dataset (manifest.json is a few KB, neurons.json.gz
+# is a few MB compressed) but still bound worst-case memory/CPU use if the
+# upstream ever returns something corrupted, truncated, or hostile. We never
+# trust the content of a downloaded file just because the request succeeded.
+MAX_MANIFEST_BYTES = 5 * 1024 * 1024  # 5 MiB
+MAX_NEURON_GZ_BYTES = 50 * 1024 * 1024  # 50 MiB compressed
+MAX_NEURON_DECOMPRESSED_BYTES = 200 * 1024 * 1024  # 200 MiB decompressed
+MAX_NEURON_ROWS = 5_000_000  # sanity bound on the parsed row count
 
 MESH_NAME_RE = re.compile(r"^[A-Za-z0-9_\-]{1,80}\.stl$")
 
@@ -262,6 +278,42 @@ def _fetch_cached(url: str, cache_path: Path) -> bytes:
         return data
 
 
+def _safe_gunzip(data: bytes, max_output_bytes: int) -> bytes:
+    """Decompress gzip bytes with a hard cap on decompressed size.
+
+    Protects against decompression bombs: a small compressed payload that
+    would expand into an enormous buffer. Raises ValueError instead of
+    materializing unbounded output if the cap would be exceeded. We never
+    trust that a successfully-downloaded file is well-behaved just because
+    the HTTP request succeeded.
+    """
+    decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    chunks = []
+    total = 0
+    chunk_size = 1 << 20  # 1 MiB input chunks
+
+    def _consume(piece: bytes) -> None:
+        nonlocal total
+        if not piece:
+            return
+        total += len(piece)
+        if total > max_output_bytes:
+            raise ValueError(f"decompressed data exceeds {max_output_bytes} byte safety cap")
+        chunks.append(piece)
+
+    for start in range(0, len(data), chunk_size):
+        remaining = max_output_bytes - total + 1
+        _consume(decompressor.decompress(data[start : start + chunk_size], remaining))
+        while decompressor.unconsumed_tail:
+            remaining = max_output_bytes - total + 1
+            piece = decompressor.decompress(decompressor.unconsumed_tail, remaining)
+            if not piece:
+                break
+            _consume(piece)
+    _consume(decompressor.flush())
+    return b"".join(chunks)
+
+
 # ---------------------------------------------------------------------------
 # Neuron soma sample (MaleCNS v1.0, brain + nerve cord, 166,700 neurons)
 # ---------------------------------------------------------------------------
@@ -326,24 +378,38 @@ def _build_neuron_sample():
     those names -- the two descriptions of this found while researching the
     source were contradictory. This function handles both shapes (see
     _row_to_fields) and only emits a point when real x/y/z coordinates were
-    actually parsed from the source; it never fabricates a point.
+    actually parsed from the source; it never fabricates a point. All
+    downloaded/decompressed data is validated and size-capped before use;
+    a successful download is never assumed to be well-formed.
     """
     manifest_bytes = _fetch_cached(f"{HF_DATA}/manifest.json", CACHE_DIR / "data" / "manifest.json")
+    if len(manifest_bytes) > MAX_MANIFEST_BYTES:
+        raise ValueError(f"manifest.json exceeds {MAX_MANIFEST_BYTES} byte safety cap")
     manifest = json.loads(manifest_bytes.decode("utf-8"))
+    if not isinstance(manifest, dict):
+        raise ValueError("manifest.json is not a JSON object")
 
     metadata_file = manifest.get("metadata", "neurons.json.gz")
+    if not isinstance(metadata_file, str) or not metadata_file:
+        raise ValueError("manifest.json has no usable 'metadata' filename")
     columns = manifest.get("metadataColumns") or DEFAULT_NEURON_METADATA_COLUMNS
+    if not isinstance(columns, list) or not all(isinstance(c, str) for c in columns):
+        columns = DEFAULT_NEURON_METADATA_COLUMNS
     dataset_name = manifest.get("dataset", "MaleCNS v1.0")
     total_neurons = manifest.get("neurons")
 
     gz_bytes = _fetch_cached(f"{HF_DATA}/{metadata_file}", CACHE_DIR / "data" / metadata_file)
-    raw = gzip.decompress(gz_bytes)
+    if len(gz_bytes) > MAX_NEURON_GZ_BYTES:
+        raise ValueError(f"{metadata_file} exceeds {MAX_NEURON_GZ_BYTES} byte safety cap")
+    raw = _safe_gunzip(gz_bytes, MAX_NEURON_DECOMPRESSED_BYTES)
     rows = json.loads(raw.decode("utf-8"))
     if not isinstance(rows, list):
         raise ValueError("neuron metadata is not a JSON array")
+    if len(rows) > MAX_NEURON_ROWS:
+        raise ValueError(f"neuron metadata exceeds {MAX_NEURON_ROWS} row safety cap")
 
     total_rows = len(rows)
-    if total_neurons is None:
+    if not isinstance(total_neurons, int) or total_neurons <= 0:
         total_neurons = total_rows
 
     target = min(NEURON_SAMPLE_SIZE, total_rows)
@@ -422,6 +488,15 @@ class ChatError(Exception):
 
 
 def call_gemini(persona_prompt: str, message: str) -> str:
+    """Call Gemini's generateContent REST endpoint and return the reply text.
+
+    Security note: GEMINI_API_KEY is sent to Google as a URL query parameter
+    (Google's documented auth mechanism for this endpoint). Every error path
+    below builds its message only from the HTTP status code and a bounded,
+    sanitized detail string -- never from the request URL or from str(exc) on
+    the raised exception -- so the key can never leak into a client-visible
+    error message or into anything this function returns.
+    """
     if not GEMINI_API_KEY:
         raise ChatError(500, "Server is not configured with a Gemini API key.")
 
@@ -429,8 +504,10 @@ def call_gemini(persona_prompt: str, message: str) -> str:
         "https://generativelanguage.googleapis.com/v1beta/models/"
         f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
     )
+    # NOTE: 'url' (which contains the API key) must never be interpolated
+    # into a ChatError message or logged below.
     payload = {
-        "system_instruction": {"parts": [{"text": persona_prompt}]},
+        "systemInstruction": {"parts": [{"text": persona_prompt}]},
         "contents": [{"role": "user", "parts": [{"text": message}]}],
         "generationConfig": {"temperature": 0.9, "maxOutputTokens": 220},
     }
@@ -446,15 +523,33 @@ def call_gemini(persona_prompt: str, message: str) -> str:
             raw = resp.read()
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")[:300]
-        raise ChatError(502, f"Gemini API returned an error ({exc.code}): {detail}")
+        raise ChatError(502, f"Gemini API returned an error (HTTP {exc.code}): {detail}") from None
     except urllib.error.URLError as exc:
-        raise ChatError(502, f"Could not reach Gemini API: {exc.reason}")
+        raise ChatError(502, f"Could not reach Gemini API: {exc.reason}") from None
 
     try:
         data = json.loads(raw.decode("utf-8"))
-        text = data["candidates"][0]["content"]["parts"][0]["text"]
-    except (KeyError, IndexError, ValueError, TypeError):
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ChatError(502, "Gemini API returned a response that was not valid JSON.") from None
+
+    if not isinstance(data, dict):
         raise ChatError(502, "Gemini API returned an unexpected response shape.")
+
+    candidates = data.get("candidates")
+    if not candidates or not isinstance(candidates, list):
+        feedback = data.get("promptFeedback")
+        block_reason = feedback.get("blockReason") if isinstance(feedback, dict) else None
+        if block_reason:
+            raise ChatError(502, f"Gemini API returned no content (blocked: {block_reason}).")
+        raise ChatError(502, "Gemini API returned no candidates.")
+
+    try:
+        text = candidates[0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError, TypeError):
+        raise ChatError(502, "Gemini API returned an unexpected response shape.") from None
+
+    if not isinstance(text, str) or not text.strip():
+        raise ChatError(502, "Gemini API returned an empty reply.")
 
     return text.strip()
 
@@ -617,7 +712,7 @@ class Handler(BaseHTTPRequestHandler):
             sample = get_neuron_sample()
         except (urllib.error.URLError, OSError) as exc:
             return self._send_error_json(502, f"Could not fetch neuron data: {exc}")
-        except (ValueError, json.JSONDecodeError, gzip.BadGzipFile) as exc:
+        except (ValueError, json.JSONDecodeError, zlib.error) as exc:
             return self._send_error_json(502, f"Could not parse neuron data: {exc}")
         self._send_json(200, sample)
 
