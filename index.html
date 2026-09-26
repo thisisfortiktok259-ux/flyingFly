@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flying Fly — Neural + Street Lab</title>
+<meta name="description" content="Split-screen sci-fi lab: MaleCNS fly neuron telemetry on the left, an animated street scene on the right.">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+
+<link rel="stylesheet" href="./style.css">
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+
+<a class="skip-link" href="#main-content">Skip to main content</a>
+
+<div id="app" class="app-shell">
+
+  <header class="app-header">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">◈</span>
+      <div class="brand-text">
+        <h1>Flying Fly</h1>
+        <p class="brand-subtitle">Neural telemetry lab &amp; street scene</p>
+      </div>
+    </div>
+    <button id="sound-toggle" class="sound-toggle" type="button" aria-pressed="false">
+      <span class="sound-icon" aria-hidden="true">🔈</span>
+      <span class="sound-label">Enable sound</span>
+    </button>
+  </header>
+
+  <main id="main-content" class="split-screen">
+
+    <section class="panel panel-brain" aria-labelledby="brain-panel-title">
+      <div class="panel-header">
+        <h2 id="brain-panel-title">Neural telemetry</h2>
+        <p id="source-label" class="source-label">Loading data source…</p>
+      </div>
+
+      <div class="brain-viewport">
+        <canvas id="brain-canvas" tabindex="0" aria-label="3D view of the MaleCNS brain and ventral nerve cord neuron positions"></canvas>
+        <p class="brain-note">
+          Real MaleCNS v1.0 connectome (166,700 brain + VNC neurons).
+          <strong>Animated activity is a modeled visualization, not measured or real firing data.</strong>
+        </p>
+      </div>
+
+      <div class="telemetry-grid">
+        <div class="scope-block">
+          <h3>PAM11 oscilloscope</h3>
+          <canvas id="scope-canvas" width="320" height="110" aria-label="PAM11 oscilloscope trace, modeled activity"></canvas>
+        </div>
+        <div class="raster-block">
+          <h3>Spike raster</h3>
+          <canvas id="raster-canvas" width="320" height="110" aria-label="Modeled spike raster plot"></canvas>
+        </div>
+      </div>
+
+      <div class="equalizer-block">
+        <div class="block-heading-row">
+          <h3>Activity equalizer</h3>
+          <p id="telemetry-rate" class="telemetry-rate">-- Hz (modeled)</p>
+        </div>
+        <div id="equalizer" class="equalizer" role="img" aria-label="28-bar modeled neural activity equalizer"></div>
+      </div>
+
+      <div class="motor-block">
+        <h3>Motor drive</h3>
+        <div class="motor-controls">
+          <label class="motor-control" for="motor-walk">
+            <span class="motor-control-label">Walk</span>
+            <input type="range" id="motor-walk" min="0" max="100" value="0" step="1" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          </label>
+          <label class="motor-control" for="motor-turn">
+            <span class="motor-control-label">Turn</span>
+            <input type="range" id="motor-turn" min="-100" max="100" value="0" step="1" aria-valuemin="-100" aria-valuemax="100" aria-valuenow="0">
+          </label>
+          <label class="motor-control" for="motor-escape">
+            <span class="motor-control-label">Escape</span>
+            <input type="range" id="motor-escape" min="0" max="100" value="0" step="1" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          </label>
+        </div>
+      </div>
+
+      <div class="log-block">
+        <h3>Neuronal event log</h3>
+        <ul id="event-log" class="event-log" aria-live="polite" aria-label="Neuronal event log"></ul>
+      </div>
+    </section>
+
+    <section class="panel panel-world" aria-labelledby="world-panel-title">
+      <div class="panel-header">
+        <h2 id="world-panel-title" class="sr-only">Street scene</h2>
+        <p id="chapter-name" class="chapter-name">Chapter 1 — Sidewalk</p>
+        <div class="chapter-controls" role="group" aria-label="Chapter navigation">
+          <button class="chapter-btn" id="chapter-prev" type="button" aria-label="Previous chapter">‹</button>
+          <button class="chapter-btn" id="chapter-autoplay" type="button" aria-pressed="true">Auto</button>
+          <button class="chapter-btn" id="chapter-next" type="button" aria-label="Next chapter">›</button>
+        </div>
+      </div>
+
+      <div class="world-viewport">
+        <canvas id="world-canvas" tabindex="0" aria-label="Animated street scene: skateboarder and car chapters"></canvas>
+
+        <div class="phone-hud" aria-hidden="true">
+          <div class="phone-hud-frame">
+            <span class="hud-rec">● REC</span>
+            <span class="hud-battery">87%</span>
+          </div>
+        </div>
+
+        <p id="caption" class="caption" aria-live="polite">&lt;...&gt;</p>
+      </div>
+
+      <ol class="chapter-list" aria-label="Chapters">
+        <li class="chapter-item" data-chapter="1">1. Sidewalk roll</li>
+        <li class="chapter-item" data-chapter="2">2. Street crossing</li>
+        <li class="chapter-item" data-chapter="3">3. Car pass-by</li>
+        <li class="chapter-item" data-chapter="4">4. Night skate</li>
+      </ol>
+
+      <p id="status" class="status-text" role="status" aria-live="polite">Loading scene…</p>
+    </section>
+
+  </main>
+
+  <footer class="app-footer">
+    <p>Neuron positions are real MaleCNS v1.0 soma coordinates. No firing rates or neural simulation are computed or claimed.</p>
+  </footer>
+</div>
+
+<div id="loading-screen" class="loading-screen" role="status" aria-live="polite">
+  <div class="loading-spinner" aria-hidden="true"></div>
+  <p class="loading-text">Loading assets…</p>
+</div>
+
+<div id="error-banner" class="error-banner" role="alert" hidden></div>
+
+<script type="module" src="./game.js"></script>
+</body>
+</html>
