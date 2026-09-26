@@ -1,65 +1,68 @@
 /**
  * game.js
+ * ---------------------------------------------------------------------------
+ * Гневный комментатор — fully autonomous 3D fly simulation front end.
  *
- * ------------------------------------------------------------
- * Flying Fly — autonomous 3D fly simulation front end.
+ * This file is the ONLY frontend module this change touches (aside from the
+ * coordinated markup/CSS in index.html/style.css). It coordinates with:
+ *   - index.html, which declares an importmap for "three" (three@0.169.0) and
+ *     the element ids: brain-canvas, world-canvas, scope-canvas,
+ *     raster-canvas, equalizer, backend-label, brain-progress-fill,
+ *     brain-progress-text, source-label, telemetry-rate, spikes-rate,
+ *     status, sound-toggle, event-log, comment-log, subtitle,
+ *     comments-count, forced-count, fatigue-fill, fatigue-value,
+ *     anger-fill, anger-value, loading-screen, loading-text, error-banner.
+ *   - fly_rig.js, imported as `import { loadFly } from './fly_rig.js'`.
+ *     `await loadFly(THREE, onProgress)` resolves to a rig object shaped as
+ *     { group, update(t, walkingStrength, mood, options), parts, setRagdoll,
+ *     applyImpulse, isRagdolling, floorY }. This file measures the loaded
+ *     rig's bounding box at load time (THREE.Box3) rather than assuming a
+ *     fixed scale, and guards setRagdoll/applyImpulse with typeof checks so
+ *     the game keeps running (with a visible warning in the event log) if a
+ *     concurrently-evolving rig build temporarily omits either method.
+ *   - neuro_sim.js, imported lazily via dynamic `import('./neuro_sim.js')`
+ *     inside try/catch. `await createConnectomeSim({ displayIndices,
+ *     rasterCount, onProgress })` resolves to a sim object exposing
+ *     backend, neuronCount/edgeCount/synapseCount, dataset, groups,
+ *     step(dt), getSummary(), stimulate(target, rateHz, durationMs),
+ *     setDrive(0..2), dispose(). If the import or the async factory throws
+ *     for any reason (missing file, WebGPU/CPU worker failure, network
+ *     error), this file never fabricates neural activity: the brain panel
+ *     shows "симуляция недоступна", the oscilloscope/raster render flat
+ *     "нет данных" traces, and every stimulate()/setDrive() call becomes a
+ *     no-op guarded by `if (sim) ...`.
+ *   - GET /api/neurons, which returns REAL sampled MaleCNS soma coordinates
+ *     as { dataset, total, source, points:[{x,y,z,index,type,side,nt,
+ *     superclass}] }. If that request fails, this file shows an explicit
+ *     error (status text, event log, error banner) and renders NO point
+ *     cloud. It never fabricates or invents connectome data. point.index
+ *     values are used as the sim's displayIndices so displaySpikes color
+ *     the exact same real points (cyan rest -> gold spike).
  *
- * This file is the ONLY frontend module this change touches (aside from
- * coordinated markup/CSS tweaks in index.html/style.css needed to match).
- * It coordinates with index.html, which declares an importmap for "three"
- * (three@0.169.0) and the following element ids:
- * brain-canvas, world-canvas, scope-canvas, raster-canvas, equalizer,
- * chapter-name, chapter-list, chapter-prev, chapter-next, chapter-autoplay,
- * caption, source-label, telemetry-rate, motor-walk, motor-turn,
- * motor-escape, status, sound-toggle, event-log, loading-screen,
- * error-banner
- *
- * Important framing, matching the backend README:
- * - The fly is fully autonomous. There are no manual flight controls. The
- *   motor-walk / motor-turn / motor-escape sliders are read-only telemetry
- *   reflecting what the autopilot is doing, not inputs (their pointer/key
- *   interaction is suppressed and aria-readonly is set). The chapter-prev /
- *   chapter-next / chapter-autoplay buttons and the chapter-list only pick
- *   which narrative segment the camera focuses on; they never override the
- *   fly's own movement logic.
- * - GET /api/neurons returns REAL sampled MaleCNS soma coordinates. If that
- *   request fails, this file shows an explicit error (status text, event
- *   log, and error banner) and renders NO point cloud. It never fabricates
- *   or invents connectome data.
- * - The oscilloscope, 96-channel raster, and the point-cloud pulse shader
- *   are procedurally modeled visual flourishes (loosely referencing an
- *   89.3 Hz baseline that ramps into a 125-140 Hz "excited" band, and
- *   PAM-style burst timing). None of this is a recording of real
- *   electrophysiology, none of it is labeled as an actual recording, and
- *   this project does not claim a whole-fly neural emulation anywhere.
- * - The 28-bar equalizer is a set of real DOM elements (.eq-bar divs inside
- *   #equalizer) whose heights are driven by a REAL WebAudio AnalyserNode
- *   listening to a synthesized, original 140 BPM procedural loop built from
- *   oscillators/noise buffers (no samples, no copyrighted audio). Audio
- *   only starts after the user clicks the sound toggle.
- * - The fly body model is loaded from the real STL/model.json assets via
- *   fly_rig.js's loadFly(). If loading fails, the status text and error
- *   banner say so and NO primitive placeholder fly is drawn.
- * - The phone "screen" content is drawn with an original, procedurally
- *   drawn CanvasTexture that simulates a generic vertical short-form video
- *   feed (progress dots, a heart/like counter, an @handle). It contains no
- *   downloaded video, no real footage, and no third-party logos or brand
- *   names — it is a stylized, original UI mockup only.
- * - The skateboard, compact car, and podium are stylized, generic
- *   geometric props with no logos/decals and make no trademark or brand
- *   claims.
- * - Chat uses POST /api/chat with the backend's exact NPC name whitelist
- *   (Cyrillic: Зина, Артем, Григорий, Петрович, Барсик, Даня).
- *   Replies are model-generated text (see server.py / README), shown as
- *   subtitles and, opt-in only after a user gesture, read aloud with the
- *   Web Speech API in ru-RU.
- * - Autonomous chapter cycle order is: phone check (simulated short-form
- *   video break) -> street NPC chat -> skateboard -> compact car, with the
- *   podium kept as an optional fifth chapter at the end of the loop. Users
- *   can step chapters manually (chapter-prev/next) or pause the automatic
- *   cycle (chapter-autoplay); the chapter-list is rendered dynamically from
- *   this same chapter set so its labels can never drift out of sync.
- * ------------------------------------------------------------------------
+ * Game design (see project brief "Гневный комментатор"):
+ *   The fly stands at a laptop and autonomously types angry-but-harmless
+ *   Russian comments about mundane fictional annoyances (crumbs, weather,
+ *   lamp light, short videos, wifi, missing sugar, ...). There are NO manual
+ *   controls; the viewer only watches. Typing raises fatigue; when fatigue
+ *   saturates the fly collapses into a ragdoll heap. A procedurally built
+ *   beetle overseer ("жук-надзиратель", primitive geometry only — the
+ *   fly itself is always the real STL rig) walks in, pokes the fly with an
+ *   impulse, and the loop resumes forever. All Gemini/API chat, the TikTok
+ *   phone scene, the street/NPC scene, the skateboard, the compact car, the
+ *   podium, and the chapter system from the previous version are removed.
+ *   There is no /api/chat call anywhere in this file and no speech synthesis
+ *   of any AI-generated reply.
+ *   The 28-bar equalizer is real DOM elements (.eq-bar inside #equalizer)
+ *   driven by a real WebAudio AnalyserNode listening to a synthesized,
+ *   original keyboard-click + ambient pad loop (oscillators/noise buffers
+ *   only, no samples, no copyrighted audio). Audio only starts after the
+ *   user clicks the sound toggle (autoplay policy).
+ *   The oscilloscope, spike raster, point-cloud colors, spikes/second
+ *   counter, and "anger" reading are all computed from neuro_sim.js's real
+ *   step()/getSummary() output when the sim loaded successfully; they are
+ *   explicitly labeled as model output computed on the real MaleCNS
+ *   connectome, never as recorded electrophysiology.
+ * ---------------------------------------------------------------------------
  */
 import * as THREE from 'three';
 import { loadFly } from './fly_rig.js';
@@ -67,84 +70,103 @@ import { loadFly } from './fly_rig.js';
 (() => {
   'use strict';
 
-  // ----------------------------------------------------------------------
+  // -------------------------------------------------------------------------
   // Config
-  // ----------------------------------------------------------------------
+  // -------------------------------------------------------------------------
   const ENDPOINTS = {
-    chat: '/api/chat',
     neurons: '/api/neurons',
   };
 
-  // Exact server whitelist (see server.py NPC_PERSONAS). Never invent names.
-  const NPC_NAMES = Object.freeze({
-    zina: 'Зина',
-    artem: 'Артем',
-    grigory: 'Григорий',
-    petrovich: 'Петрович',
-    barsik: 'Барсик',
-    danya: 'Даня',
-  });
-
-  const CHAT_MIN_INTERVAL_MS = 5000; // request throttling for /api/chat
-  const CHAT_TIMEOUT_MS = 12000;
-
-  // Fallback chapter dwell window; per-chapter overrides live in
-  // CHAPTER_DURATIONS below (phone swipes are quick, conversational
-  // chapters get more room so a chat reply has time to land).
-  const CHAPTER_MIN_MS = 6000;
-  const CHAPTER_MAX_MS = 8000;
-  const CHAPTER_DURATIONS = {
-    phone: [6000, 8000],
-    street: [8000, 11000],
-    skate: [8000, 11000],
-    car: [8000, 11000],
-    podium: [8000, 11000],
-  };
-
-  const EQUALIZER_BARS = 28;
-  const RASTER_ROWS = 48; // sampled rows drawn out of...
-  const RASTER_CHANNELS = 96; // ...a modeled 96-channel layout (2 channels/row)
   const MAX_EVENT_LOG_ENTRIES = 30;
+  const MAX_COMMENT_LOG_ENTRIES = 40;
+  const MAX_PIXEL_RATIO = 2;
+  const EQUALIZER_BARS = 28;
+  const RASTER_COUNT = 48;
+  const OSCILLOSCOPE_HISTORY = 180;
 
-  const CHAPTER_LINES = {
-    street: ['Что там видно с высоты?', 'Куда лучше свернуть на этой улице?'],
-    skate: ['Покажешь трюк на доске?', 'Оранжевые колёса не подводят?'],
-    car: ['Куда едет эта зелёная машина?', 'Успеешь обогнать её на повороте?'],
-    podium: ['Как ощущения на подиуме?', 'Отражение пола тебя не слепит?'],
-    phone: ['Что там на экране телефона?', 'Что ты сейчас свотришь?'],
-  };
+  const FLY_TARGET_LENGTH = 1.0; // desired longest bounding-box dimension, world units
 
-  // ----------------------------------------------------------------------
+  const BASE_TYPING_CHARS_PER_SEC = 3.4;
+  const FATIGUE_PER_KEYSTROKE = 0.011;
+  const FATIGUE_PER_SECOND_TYPING = 0.006;
+  const FATIGUE_RECOVERY_PER_SECOND = 0.0022;
+  const BEETLE_ENTRY_DELAY_MS = 2000;
+  const RAGDOLL_RECOVER_DURATION_MS = 1100;
+  const RESUME_FATIGUE = 0.35;
+  const COMMENT_GAP_MS = [350, 950];
+  const MOTOR_BASELINE_SMOOTHING = 0.02; // exponential moving average weight per second
+
+  const COMMENT_NICKNAME = 'Муха_3000';
+
+  const COMMENT_SUBJECTS = [
+    'крошки на столе', 'погода сегодня', 'этот свет лампы', 'короткие видео',
+    'вай-фай', 'этот стул', 'холодный чай', 'скричащая дверь', 'слишком тихая музыка',
+    'этот шрифт', 'бесконечная реклама', 'мигающая лампочка', 'этот сквозняк',
+    'слишком быстрый таймер', 'эти уведомления', 'скрип кресла на столе', 'отсутствие ответа от кого-то',
+  ];
+
+  const COMMENT_TEMPLATES = [
+    (s) => `${s} — это ПОЗОР!!!`,
+    (s) => `Кто вообще решил, что так может быть: ${s}?! возачно!`,
+    (s) => `Опять ${s}?! сколько можно!`,
+    (s) => `${s} довело меня до предела!!!`,
+    (s) => `Нет, ну серьёзно, ${s} — это уже слишком!`,
+    (s) => `где справедливость?! ${s} каждый день!`,
+    (s) => `мухи требуют объяснений по поводу ${s}!!!`,
+    (s) => `${s}... я больше не могу!!!`,
+    (s) => `каждый раз одно и то же: ${s}. ПОЗОр!`,
+  ];
+
+  const COMMENT_FIXED = [
+    'где МОИ САХАР?! кто его взял?!',
+    'почему видео такие короткие?! я даже не успел разозлиться!!!',
+    'почему вай-фай тормозит иименно когда я пишу?! заговор!',
+    'лампа снова мигает!!! это невыносимо!',
+    'кто-то съел мои крошки?! буду жаловаться наверху!',
+  ];
+
+  const BEETLE_LINES = [
+    'А ну пиши дальше! Комментарии сами себя не напишут!',
+    'Хватит валяться! Вставать и работать!',
+    'Перерыв окончен, за работу!',
+    'Кто разрешил отдыхать?! Пиши!',
+    'Вставай, муха! Начальство не ждёт!',
+  ];
+
+  // -------------------------------------------------------------------------
   // DOM references (coordinated ids; every lookup is null-safe)
-  // ----------------------------------------------------------------------
+  // -------------------------------------------------------------------------
   const dom = {
     brainCanvas: document.getElementById('brain-canvas'),
     worldCanvas: document.getElementById('world-canvas'),
     scopeCanvas: document.getElementById('scope-canvas'),
     rasterCanvas: document.getElementById('raster-canvas'),
     equalizer: document.getElementById('equalizer'),
-    chapterName: document.getElementById('chapter-name'),
-    chapterList: document.getElementById('chapter-list'),
-    chapterPrev: document.getElementById('chapter-prev'),
-    chapterNext: document.getElementById('chapter-next'),
-    chapterAutoplay: document.getElementById('chapter-autoplay'),
-    caption: document.getElementById('caption'),
+    backendLabel: document.getElementById('backend-label'),
+    brainProgressFill: document.getElementById('brain-progress-fill'),
+    brainProgressText: document.getElementById('brain-progress-text'),
     sourceLabel: document.getElementById('source-label'),
     telemetryRate: document.getElementById('telemetry-rate'),
-    motorWalk: document.getElementById('motor-walk'),
-    motorTurn: document.getElementById('motor-turn'),
-    motorEscape: document.getElementById('motor-escape'),
+    spikesRate: document.getElementById('spikes-rate'),
     status: document.getElementById('status'),
     soundToggle: document.getElementById('sound-toggle'),
     eventLog: document.getElementById('event-log'),
+    commentLog: document.getElementById('comment-log'),
+    subtitle: document.getElementById('subtitle'),
+    commentsCount: document.getElementById('comments-count'),
+    forcedCount: document.getElementById('forced-count'),
+    fatigueFill: document.getElementById('fatigue-fill'),
+    fatigueValue: document.getElementById('fatigue-value'),
+    angerFill: document.getElementById('anger-fill'),
+    angerValue: document.getElementById('anger-value'),
     loadingScreen: document.getElementById('loading-screen'),
+    loadingText: document.getElementById('loading-text'),
     errorBanner: document.getElementById('error-banner'),
   };
 
-  // ----------------------------------------------------------------------
+  // -------------------------------------------------------------------------
   // Status text, event log, error banner, loading screen
-  // ----------------------------------------------------------------------
-  let fatalErrorActive = false;
+  // -------------------------------------------------------------------------
   let errorBannerTimeout = null;
 
   function setStatus(message, state) {
@@ -187,17 +209,36 @@ import { loadFly } from './fly_rig.js';
     if (dom.loadingScreen) dom.loadingScreen.hidden = true;
   }
 
-  function showCaption(npcName, replyText) {
-    if (!dom.caption) return;
-    dom.caption.textContent = replyText ? `${npcName}: ${replyText}` :
-      `${npcName}: …`;
+  function setLoadingText(text) {
+    if (dom.loadingText) dom.loadingText.textContent = text;
   }
 
-  // ----------------------------------------------------------------------
-  // Renderer helpers (two THREE.WebGLRenderer instances, responsive resize)
-  // ----------------------------------------------------------------------
-  const MAX_PIXEL_RATIO = 2; // rendering budget cap
+  function appendCommentToSideLog(nickname, text, likes) {
+    if (!dom.commentLog) return;
+    const li = document.createElement('li');
+    const nick = document.createElement('span');
+    nick.className = 'comment-nick';
+    nick.textContent = nickname;
+    const body = document.createElement('span');
+    body.className = 'comment-body';
+    body.textContent = text;
+    const likesEl = document.createElement('span');
+    likesEl.className = 'comment-likes';
+    likesEl.textContent = `♥ ${likes}`;
+    li.appendChild(nick);
+    li.appendChild(body);
+    li.appendChild(document.createTextNode(' '));
+    li.appendChild(likesEl);
+    dom.commentLog.appendChild(li);
+    while (dom.commentLog.children.length > MAX_COMMENT_LOG_ENTRIES) {
+      dom.commentLog.removeChild(dom.commentLog.firstChild);
+    }
+    dom.commentLog.scrollTop = dom.commentLog.scrollHeight;
+  }
 
+  // -------------------------------------------------------------------------
+  // Renderer helpers (two THREE.WebGLRenderer instances, responsive resize)
+  // -------------------------------------------------------------------------
   function makeRenderer(canvas) {
     if (!canvas) return null;
     const renderer = new THREE.WebGLRenderer({
@@ -206,8 +247,7 @@ import { loadFly } from './fly_rig.js';
       alpha: true,
       powerPreference: 'high-performance',
     });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1,
-      MAX_PIXEL_RATIO));
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO));
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     return renderer;
   }
@@ -231,8 +271,8 @@ import { loadFly } from './fly_rig.js';
   function sizeCanvas2d(canvas) {
     if (!canvas) return;
     const dpr = Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO);
-    const width = Math.max(1, canvas.clientWidth);
-    const height = Math.max(1, canvas.clientHeight);
+    const width = Math.max(1, canvas.clientWidth || parseInt(canvas.getAttribute('width'), 10) || 320);
+    const height = Math.max(1, canvas.clientHeight || parseInt(canvas.getAttribute('height'), 10) || 110);
     const targetW = Math.floor(width * dpr);
     const targetH = Math.floor(height * dpr);
     if (canvas.width !== targetW || canvas.height !== targetH) {
@@ -256,11 +296,11 @@ import { loadFly } from './fly_rig.js';
     window.addEventListener('resize', () => canvases.forEach(sizeCanvas2d));
   }
 
-  // ----------------------------------------------------------------------
+  // -------------------------------------------------------------------------
   // Equalizer: #equalizer is a <div role="img">, not a canvas. Build
   // EQUALIZER_BARS real .eq-bar <div> children once and drive their height
   // from a real WebAudio AnalyserNode each frame.
-  // ----------------------------------------------------------------------
+  // -------------------------------------------------------------------------
   let equalizerBarEls = [];
 
   function buildEqualizerBars() {
@@ -284,15 +324,193 @@ import { loadFly } from './fly_rig.js';
       let sum = 0;
       const start = i * bucketSize;
       for (let j = 0; j < bucketSize; j++) sum += freqData[start + j] || 0;
-      const avg = sum / bucketSize; // 0-255
+      const avg = sum / bucketSize;
       const pct = Math.max(8, Math.min(100, (avg / 255) * 100));
       equalizerBarEls[i].style.height = `${pct.toFixed(1)}%`;
     }
   }
 
-  // ----------------------------------------------------------------------
+  function decayEqualizerIdle() {
+    equalizerBarEls.forEach((bar) => {
+      const current = parseFloat(bar.style.height) || 8;
+      bar.style.height = `${Math.max(8, current * 0.9).toFixed(1)}%`;
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // WebAudio: synthesized keyboard clicks + ambient pad, gated by user gesture
+  // -------------------------------------------------------------------------
+  const audio = {
+    ctx: null,
+    master: null,
+    analyser: null,
+    freqData: null,
+    padNodes: null,
+    enabled: false,
+  };
+
+  function ensureAudioContext() {
+    if (audio.ctx) return audio.ctx;
+    const Ctor = window.AudioContext || window.webkitAudioContext;
+    if (!Ctor) return null;
+    const ctx = new Ctor();
+    const master = ctx.createGain();
+    master.gain.value = 0.55;
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 256;
+    analyser.smoothingTimeConstant = 0.75;
+    master.connect(analyser);
+    analyser.connect(ctx.destination);
+    audio.ctx = ctx;
+    audio.master = master;
+    audio.analyser = analyser;
+    audio.freqData = new Uint8Array(analyser.frequencyBinCount);
+    return ctx;
+  }
+
+  function startAmbientPad() {
+    if (!audio.ctx || audio.padNodes) return;
+    const ctx = audio.ctx;
+    const padGain = ctx.createGain();
+    padGain.gain.value = 0.05;
+    padGain.connect(audio.master);
+
+    const osc1 = ctx.createOscillator();
+    osc1.type = 'sine';
+    osc1.frequency.value = 82.4;
+    const osc2 = ctx.createOscillator();
+    osc2.type = 'sine';
+    osc2.frequency.value = 82.4 * 1.005;
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 400;
+
+    const lfo = ctx.createOscillator();
+    lfo.type = 'sine';
+    lfo.frequency.value = 0.08;
+    const lfoGain = ctx.createGain();
+    lfoGain.gain.value = 120;
+    lfo.connect(lfoGain);
+    lfoGain.connect(filter.frequency);
+
+    osc1.connect(filter);
+    osc2.connect(filter);
+    filter.connect(padGain);
+
+    osc1.start();
+    osc2.start();
+    lfo.start();
+
+    audio.padNodes = { osc1, osc2, lfo, padGain, filter };
+  }
+
+  function playKeyClick() {
+    if (!audio.enabled || !audio.ctx) return;
+    const ctx = audio.ctx;
+    const now = ctx.currentTime;
+
+    const bufferSize = Math.floor(ctx.sampleRate * 0.02);
+    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      data[i] = (Math.random() * 2 - 1) * (1 - i / bufferSize);
+    }
+    const noise = ctx.createBufferSource();
+    noise.buffer = buffer;
+    const noiseFilter = ctx.createBiquadFilter();
+    noiseFilter.type = 'highpass';
+    noiseFilter.frequency.value = 1800 + Math.random() * 800;
+    const noiseGain = ctx.createGain();
+    noiseGain.gain.setValueAtTime(0.22, now);
+    noiseGain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
+    noise.connect(noiseFilter);
+    noiseFilter.connect(noiseGain);
+    noiseGain.connect(audio.master);
+    noise.start(now);
+    noise.stop(now + 0.06);
+
+    const tick = ctx.createOscillator();
+    tick.type = 'square';
+    tick.frequency.value = 1200 + Math.random() * 400;
+    const tickGain = ctx.createGain();
+    tickGain.gain.setValueAtTime(0.05, now);
+    tickGain.gain.exponentialRampToValueAtTime(0.001, now + 0.03);
+    tick.connect(tickGain);
+    tickGain.connect(audio.master);
+    tick.start(now);
+    tick.stop(now + 0.03);
+  }
+
+  function playStartleSting() {
+    if (!audio.enabled || !audio.ctx) return;
+    const ctx = audio.ctx;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(220, now);
+    osc.frequency.exponentialRampToValueAtTime(60, now + 0.3);
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.18, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
+    osc.connect(gain);
+    gain.connect(audio.master);
+    osc.start(now);
+    osc.stop(now + 0.36);
+  }
+
+  function setupSoundToggle() {
+    if (!dom.soundToggle) return;
+    dom.soundToggle.addEventListener('click', () => {
+      const ctx = ensureAudioContext();
+      if (!ctx) {
+        showErrorBanner('Аудио недоступно в этом браузере.', false);
+        return;
+      }
+      if (ctx.state === 'suspended') ctx.resume();
+      audio.enabled = !audio.enabled;
+      dom.soundToggle.setAttribute('aria-pressed', String(audio.enabled));
+      const label = dom.soundToggle.querySelector('.sound-label');
+      if (label) label.textContent = audio.enabled ? 'Выключить звук' : 'Включить звук';
+      if (audio.enabled) {
+        startAmbientPad();
+        logEvent('Звук включён.');
+      } else {
+        logEvent('Звук выключен.');
+      }
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Comment generator (procedural, Russian, harmless/mundane topics only)
+  // -------------------------------------------------------------------------
+  let lastSubjectIndex = -1;
+
+  function generateComment() {
+    if (Math.random() < 0.22) {
+      return COMMENT_FIXED[Math.floor(Math.random() * COMMENT_FIXED.length)];
+    }
+    let subjIdx = Math.floor(Math.random() * COMMENT_SUBJECTS.length);
+    if (subjIdx === lastSubjectIndex) {
+      subjIdx = (subjIdx + 1) % COMMENT_SUBJECTS.length;
+    }
+    lastSubjectIndex = subjIdx;
+    const subject = COMMENT_SUBJECTS[subjIdx];
+    const template = COMMENT_TEMPLATES[Math.floor(Math.random() * COMMENT_TEMPLATES.length)];
+    return template(subject);
+  }
+
+  let lastBeetleLineIndex = -1;
+  function pickBeetleLine() {
+    let idx = Math.floor(Math.random() * BEETLE_LINES.length);
+    if (idx === lastBeetleLineIndex) idx = (idx + 1) % BEETLE_LINES.length;
+    lastBeetleLineIndex = idx;
+    return BEETLE_LINES[idx];
+  }
+
+  // -------------------------------------------------------------------------
   // Small canvas drawing helpers (original procedural graphics only)
-  // ----------------------------------------------------------------------
+  // -------------------------------------------------------------------------
   function roundedRectPath(ctx, x, y, w, h, r) {
     ctx.beginPath();
     ctx.moveTo(x + r, y);
@@ -304,7 +522,7 @@ import { loadFly } from './fly_rig.js';
   }
 
   function wrapText(ctx, text, x, y, maxWidth, lineHeight) {
-    if (!text) return;
+    if (!text) return y;
     const words = String(text).split(' ');
     let line = '';
     let cursorY = y;
@@ -319,1216 +537,944 @@ import { loadFly } from './fly_rig.js';
       }
     }
     if (line) ctx.fillText(line, x, cursorY);
+    return cursorY + lineHeight;
   }
 
-  function easeOutCubic(x) {
-    return 1 - Math.pow(1 - x, 3);
-  }
-
-  function makeLabelSprite(text) {
-    const canvas = document.createElement('canvas');
-    canvas.width = 256;
-    canvas.height = 64;
-    const ctx = canvas.getContext('2d');
-    ctx.fillStyle = 'rgba(10,10,14,0.65)';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.font = '700 32px sans-serif';
-    ctx.fillStyle = '#f4f1e8';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(text, canvas.width / 2, canvas.height / 2);
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.colorSpace = THREE.SRGBColorSpace;
-    const material = new THREE.SpriteMaterial({ map: texture, depthWrite: false });
-    const sprite = new THREE.Sprite(material);
-    sprite.scale.set(1.6, 0.4, 1);
-    return sprite;
-  }
-
-  // ----------------------------------------------------------------------
-  // World scene: street, NPC places, skateboard, car, podium, phone prop
-  // ----------------------------------------------------------------------
-  const NPC_PLACES = [
-    { key: 'zina', position: new THREE.Vector3(-16, 0, 6), color: 0xff6b8b },
-    { key: 'artem', position: new THREE.Vector3(-8, 0, -6), color: 0x6bb6ff },
-    { key: 'grigory', position: new THREE.Vector3(2, 0, 8), color: 0x8f6bff },
-    { key: 'petrovich', position: new THREE.Vector3(10, 0, -7), color: 0xffb46b },
-    { key: 'barsik', position: new THREE.Vector3(18, 0, 4), color: 0x6bffb0 },
-    { key: 'danya', position: new THREE.Vector3(-2, 0, -2), color: 0xffe36b },
-  ];
-
-  // Chapter narrative metadata. Order below (object key insertion order) is
-  // not what drives playback — the explicit CHAPTER_ORDER array does — but
-  // is kept aligned with it for readability.
-  const CHAPTER_INFO = {
-    phone: { label: 'Phone check', target: new THREE.Vector3(4, 1.8, 5) },
-    street: { label: 'Street cruise', target: new THREE.Vector3(0, 1.4, 0) },
-    skate: { label: 'Skate spot', target: new THREE.Vector3(-2, 1.2, -1) },
-    car: { label: 'Compact car', target: new THREE.Vector3(6, 1.6, -3) },
-    podium: { label: 'Podium moment', target: new THREE.Vector3(-6, 1.8, 8) },
+  // =========================================================================
+  // BRAIN PANEL (left): real MaleCNS point cloud, oscilloscope, raster,
+  // connectome download progress, spikes/s counter, backend label.
+  // =========================================================================
+  const brain = {
+    scene: null,
+    camera: null,
+    renderer: null,
+    points: null,
+    colorAttr: null,
+    glow: null, // Float32Array per-point decaying glow used for cyan->gold blend
+    indexOrder: null, // point.index values, in the same order as the geometry
+    rotationSpeed: 0.06,
+    oscHistory: new Float32Array(OSCILLOSCOPE_HISTORY),
+    oscHistoryFilled: 0,
   };
 
-  // Required order: phone -> street NPC -> skateboard -> car. Podium is an
-  // optional fifth chapter kept at the end of the loop rather than removed.
-  const CHAPTER_ORDER = ['phone', 'street', 'skate', 'car', 'podium'];
-
-  // Close "hero" camera offsets relative to the fly's own position, so the
-  // fly is reliably framed at a readable size no matter where in the (much
-  // larger) street scene it currently is. Distances are in world units.
-  const CHAPTER_CAMERA_OFFSET = {
-    phone: new THREE.Vector3(0.6, 0.4, 1.1),
-    street: new THREE.Vector3(1.0, 0.65, 1.8),
-    skate: new THREE.Vector3(0.85, 0.55, 1.5),
-    car: new THREE.Vector3(1.1, 0.65, 1.9),
-    podium: new THREE.Vector3(0.9, 0.6, 1.6),
-  };
-
-  function buildStreet(scene) {
-    const group = new THREE.Group();
-    group.name = 'street';
-
-    const roadMat = new THREE.MeshStandardMaterial({ color: 0x2b2b2f, roughness:
-      0.95, metalness: 0.02 });
-    const road = new THREE.Mesh(new THREE.PlaneGeometry(60, 20), roadMat);
-    road.rotation.x = -Math.PI / 2;
-    group.add(road);
-
-    const sidewalkMat = new THREE.MeshStandardMaterial({ color: 0x9a9a92, roughness:
-      0.9 });
-    [-11, 11].forEach((z) => {
-      const walk = new THREE.Mesh(new THREE.BoxGeometry(60, 0.2, 6), sidewalkMat);
-      walk.position.set(0, 0.1, z);
-      group.add(walk);
-    });
-
-    const buildingMat = new THREE.MeshStandardMaterial({ color: 0x51525e, roughness:
-      0.8 });
-    for (let i = -3; i <= 3; i++) {
-      if (i === 0) continue;
-      const height = 3 + Math.abs(i) * 1.4;
-      const building = new THREE.Mesh(new THREE.BoxGeometry(4, height, 4),
-        buildingMat);
-      building.position.set(i * 8, height / 2, i % 2 === 0 ? 14 : -14);
-      group.add(building);
+  async function fetchNeurons() {
+    setStatus('Загрузка нейронов MaleCNS…', 'loading');
+    let response;
+    try {
+      response = await fetch(ENDPOINTS.neurons);
+    } catch (err) {
+      throw new Error(`сетевая ошибка: ${err && err.message ? err.message : err}`);
     }
-
-    const lampMat = new THREE.MeshStandardMaterial({ color: 0x2f2f33, metalness: 0.6,
-      roughness: 0.35 });
-    const lampHeadMat = new THREE.MeshStandardMaterial({
-      color: 0xfff2c4,
-      emissive: 0xffdd88,
-      emissiveIntensity: 0.8,
-    });
-    for (let i = -2; i <= 2; i++) {
-      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.07, 3.2, 8),
-        lampMat);
-      pole.position.set(i * 12, 1.6, 9.5);
-      group.add(pole);
-      const head = new THREE.Mesh(new THREE.SphereGeometry(0.18, 10, 10), lampHeadMat);
-      head.position.set(i * 12, 3.2, 9.5);
-      group.add(head);
-    }
-
-    scene.add(group);
-    return group;
-  }
-
-  function buildNpcMarkers(scene) {
-    const group = new THREE.Group();
-    group.name = 'npc-markers';
-    NPC_PLACES.forEach((place) => {
-      const marker = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.35, 0.45, 1.5, 12),
-        new THREE.MeshStandardMaterial({ color: place.color, roughness: 0.5, metalness:
-          0.1 }),
-      );
-      marker.position.copy(place.position).setY(0.75);
-      group.add(marker);
-      const label = makeLabelSprite(NPC_NAMES[place.key]);
-      label.position.copy(place.position).setY(2.1);
-      group.add(label);
-    });
-    scene.add(group);
-    return group;
-  }
-
-  // Stylized skate deck with orange wheels. Plain colors only, no logos.
-  function buildSkateboard() {
-    const group = new THREE.Group();
-    group.name = 'skateboard';
-    const deckMat = new THREE.MeshStandardMaterial({ color: 0x2a2a2a, roughness: 0.7
-    });
-    const deck = new THREE.Mesh(new THREE.BoxGeometry(1.9, 0.06, 0.5), deckMat);
-    deck.position.y = 0.22;
-    group.add(deck);
-
-    const truckMat = new THREE.MeshStandardMaterial({ color: 0xb8b8bc, metalness:
-      0.7, roughness: 0.3 });
-    const wheelMat = new THREE.MeshStandardMaterial({ color: 0xff7a1a, roughness:
-      0.4, metalness: 0.05 });
-    const wheelGeo = new THREE.CylinderGeometry(0.09, 0.09, 0.06, 16);
-
-    const wheels = [];
-    [[-0.7, -0.18], [-0.7, 0.18], [0.7, -0.18], [0.7, 0.18]].forEach(([x,
-    z]) => {
-      const truck = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.05, 0.05), truckMat);
-      truck.position.set(x, 0.16, z);
-      group.add(truck);
-      const wheel = new THREE.Mesh(wheelGeo, wheelMat);
-      wheel.rotation.z = Math.PI / 2;
-      wheel.position.set(x, 0.09, z);
-      group.add(wheel);
-      wheels.push(wheel);
-    });
-
-    group.userData.wheels = wheels;
-    return group;
-  }
-
-  // Stylized green compact car. Generic boxy shape, no badges/logos, no
-  // trademark or real-brand claim of any kind.
-  function buildCar() {
-    const group = new THREE.Group();
-    group.name = 'compact-car';
-    const bodyMat = new THREE.MeshStandardMaterial({ color: 0x2e8b57, roughness:
-      0.45, metalness: 0.35 });
-    const glassMat = new THREE.MeshPhysicalMaterial({
-      color: 0xbfe3ff,
-      roughness: 0.05,
-      metalness: 0,
-      transmission: 0.7,
-      thickness: 0.05,
-      transparent: true,
-      opacity: 0.55,
-    });
-    const wheelMat = new THREE.MeshStandardMaterial({ color: 0x161616, roughness: 0.8
-    });
-
-    const lower = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.55, 1.1), bodyMat);
-    lower.position.y = 0.45;
-    group.add(lower);
-
-    const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.5, 1.02), glassMat);
-    cabin.position.set(-0.1, 0.95, 0);
-    group.add(cabin);
-
-    const wheelGeo = new THREE.CylinderGeometry(0.28, 0.28, 0.22, 18);
-    const wheels = [];
-    [[-0.75, -0.55], [-0.75, 0.55], [0.75, -0.55], [0.75,
-    0.55]].forEach(([x, z]) => {
-      const wheel = new THREE.Mesh(wheelGeo, wheelMat);
-      wheel.rotation.x = Math.PI / 2;
-      wheel.position.set(x, 0.28, z);
-      group.add(wheel);
-      wheels.push(wheel);
-    });
-
-    group.userData.wheels = wheels;
-    group.position.set(6, 0, -3);
-    return group;
-  }
-
-  // Podium with an approximated reflective floor: MeshPhysicalMaterial with
-  // a small procedural gradient used ONLY as an environment map (no
-  // real-time mirror render target, no ray tracing).
-  function buildPodium() {
-    const group = new THREE.Group();
-    group.name = 'podium';
-
-    const envCanvas = document.createElement('canvas');
-    envCanvas.width = 64;
-    envCanvas.height = 32;
-    const envCtx = envCanvas.getContext('2d');
-    const grad = envCtx.createLinearGradient(0, 0, 0, 32);
-    grad.addColorStop(0, '#3b4b63');
-    grad.addColorStop(0.5, '#0d0f14');
-    grad.addColorStop(1, '#1c1c1c');
-    envCtx.fillStyle = grad;
-    envCtx.fillRect(0, 0, 64, 32);
-    const envTexture = new THREE.CanvasTexture(envCanvas);
-    envTexture.mapping = THREE.EquirectangularReflectionMapping;
-    envTexture.colorSpace = THREE.SRGBColorSpace;
-
-    const floorMat = new THREE.MeshPhysicalMaterial({
-      color: 0x14161c,
-      roughness: 0.18,
-      metalness: 0.6,
-      envMap: envTexture,
-      envMapIntensity: 1.1,
-      clearcoat: 0.4,
-      clearcoatRoughness: 0.25,
-    });
-    const floor = new THREE.Mesh(new THREE.CylinderGeometry(2.4, 2.6, 0.25, 32),
-      floorMat);
-    floor.position.y = 0.12;
-    group.add(floor);
-
-    const rimMat = new THREE.MeshStandardMaterial({ color: 0xd8b04a, metalness: 0.7,
-      roughness: 0.3 });
-    const rim = new THREE.Mesh(new THREE.TorusGeometry(2.5, 0.06, 12, 48), rimMat);
-    rim.rotation.x = Math.PI / 2;
-    rim.position.y = 0.25;
-    group.add(rim);
-
-    group.position.set(-6, 0, 8);
-    return group;
-  }
-
-  // Phone prop whose screen is an original, procedurally drawn CanvasTexture.
-  function buildPhoneProp() {
-    const canvas = document.createElement('canvas');
-    canvas.width = 360;
-    canvas.height = 720;
-    const ctx = canvas.getContext('2d');
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.colorSpace = THREE.SRGBColorSpace;
-
-    const bodyMat = new THREE.MeshStandardMaterial({ color: 0x141414, roughness: 0.4,
-      metalness: 0.5 });
-    const screenMat = new THREE.MeshBasicMaterial({ map: texture });
-
-    const group = new THREE.Group();
-    group.name = 'phone';
-    const body = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.86, 0.04), bodyMat);
-    group.add(body);
-    const screen = new THREE.Mesh(new THREE.PlaneGeometry(0.38, 0.8), screenMat);
-    screen.position.z = 0.021;
-    group.add(screen);
-
-    group.position.set(4, 1.6, 5);
-    group.userData = { canvas, ctx, texture };
-    return group;
-  }
-
-  function chapterColor(chapterKey, stop) {
-    const palette = {
-      street: ['#33475b', '#101820'],
-      skate: ['#7a3b12', '#1a0f08'],
-      car: ['#1f6b45', '#0c1a12'],
-      podium: ['#4a3a1a', '#141008'],
-      phone: ['#2a2a4a', '#0e0e1a'],
-    };
-    const colors = palette[chapterKey] || palette.street;
-    return colors[stop];
-  }
-
-  function drawChapterGlyph(ctx, chapterKey, cx, cy, tSeconds) {
-    ctx.save();
-    ctx.translate(cx, cy);
-    ctx.strokeStyle = 'rgba(255,255,255,0.85)';
-    ctx.lineWidth = 4;
-    const wobble = Math.sin(tSeconds * 2) * 4;
-    switch (chapterKey) {
-      case 'skate':
-        roundedRectPath(ctx, -60, 10 + wobble, 120, 14, 8);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.arc(-40, 30 + wobble, 10, 0, Math.PI * 2);
-        ctx.arc(40, 30 + wobble, 10, 0, Math.PI * 2);
-        ctx.stroke();
-        break;
-      case 'car':
-        roundedRectPath(ctx, -70, -10 + wobble, 140, 40, 12);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.arc(-40, 32 + wobble, 12, 0, Math.PI * 2);
-        ctx.arc(40, 32 + wobble, 12, 0, Math.PI * 2);
-        ctx.stroke();
-        break;
-      case 'podium':
-        ctx.beginPath();
-        ctx.ellipse(0, 20 + wobble, 55, 16, 0, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.moveTo(0, -30 + wobble);
-        ctx.lineTo(0, 4 + wobble);
-        ctx.stroke();
-        break;
-      default:
-        ctx.beginPath();
-        ctx.moveTo(-60, 20 + wobble);
-        ctx.lineTo(60, 20 + wobble);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.arc(0, -10 + wobble, 22, 0, Math.PI * 2);
-        ctx.stroke();
-    }
-    ctx.restore();
-  }
-
-  // Original, procedural short-form-video-style chrome for the phone chapter
-  // only: drifting abstract shapes (not footage), simulated feed-position
-  // dots, an @handle, and a beating heart/like counter. Purely decorative
-  // canvas drawing — no downloaded video, no logos, no real engagement data.
-  function drawPhoneFeedChrome(ctx, width, height, tSeconds, npcKey, captionText) {
-    const hue = (tSeconds * 12) % 360;
-    const gradient = ctx.createLinearGradient(0, 0, 0, height);
-    gradient.addColorStop(0, `hsl(${hue}, 45%, 16%)`);
-    gradient.addColorStop(1, `hsl(${(hue + 40) % 360}, 40%, 8%)`);
-    ctx.fillStyle = gradient;
-    ctx.fillRect(0, 0, width, height);
-
-    for (let i = 0; i < 5; i++) {
-      const px = width * (0.2 + 0.6 * ((Math.sin(tSeconds * 0.4 + i * 1.7) + 1) / 2));
-      const py = height * (0.15 + 0.6 * ((Math.cos(tSeconds * 0.33 + i * 2.1) + 1) / 2));
-      const radius = 40 + 18 * Math.sin(tSeconds * 0.6 + i);
-      ctx.beginPath();
-      ctx.fillStyle = `hsla(${(hue + i * 40) % 360}, 70%, 60%, 0.18)`;
-      ctx.arc(px, py, radius, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    const dotCount = 5;
-    for (let i = 0; i < dotCount; i++) {
-      const active = i === Math.floor(tSeconds / 2) % dotCount;
-      ctx.fillStyle = active ? 'rgba(255,255,255,0.95)' : 'rgba(255,255,255,0.35)';
-      ctx.fillRect(width - 10, 24 + i * 14, 4, active ? 18 : 10);
-    }
-
-    ctx.fillStyle = 'rgba(0,0,0,0.35)';
-    ctx.fillRect(0, height - 140, width, 140);
-    ctx.fillStyle = '#f4f1e8';
-    ctx.font = '700 24px sans-serif';
-    ctx.textAlign = 'left';
-    ctx.fillText(`@${npcKey}`, 20, height - 96);
-    ctx.font = '400 18px sans-serif';
-    ctx.fillStyle = 'rgba(255,255,255,0.85)';
-    wrapText(ctx, captionText || '', 20, height - 66, width - 90, 24);
-
-    const beat = 1 + 0.15 * Math.max(0, Math.sin(tSeconds * 3));
-    ctx.save();
-    ctx.translate(width - 40, height - 90);
-    ctx.scale(beat, beat);
-    ctx.fillStyle = '#ff5c7a';
-    ctx.beginPath();
-    ctx.moveTo(0, 6);
-    ctx.bezierCurveTo(-14, -10, -2, -22, 0, -8);
-    ctx.bezierCurveTo(2, -22, 14, -10, 0, 6);
-    ctx.fill();
-    ctx.restore();
-
-    // Decorative UI chrome only — NOT a measurement of real engagement.
-    ctx.fillStyle = 'rgba(255,255,255,0.85)';
-    ctx.font = '400 14px sans-serif';
-    ctx.textAlign = 'center';
-    const likeCount = Math.floor(120 + tSeconds * 3) % 999;
-    ctx.fillText(String(likeCount), width - 40, height - 55);
-    ctx.textAlign = 'left';
-  }
-
-  function drawGenericChapterPanel(ctx, chapterKey, npcKey, tSeconds, width, height) {
-    const gradient = ctx.createLinearGradient(0, 0, 0, height);
-    gradient.addColorStop(0, chapterColor(chapterKey, 0));
-    gradient.addColorStop(1, chapterColor(chapterKey, 1));
-    ctx.fillStyle = gradient;
-    ctx.fillRect(0, 0, width, height);
-
-    drawChapterGlyph(ctx, chapterKey, width / 2, height * 0.4, tSeconds);
-
-    ctx.fillStyle = 'rgba(0,0,0,0.4)';
-    ctx.fillRect(0, height - 120, width, 120);
-    ctx.fillStyle = '#f4f1e8';
-    ctx.font = '700 22px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText(CHAPTER_INFO[chapterKey] ? CHAPTER_INFO[chapterKey].label : '',
-      width / 2, height - 84);
-    ctx.font = '400 16px sans-serif';
-    ctx.fillStyle = 'rgba(255,255,255,0.8)';
-    wrapText(ctx, `with ${NPC_NAMES[npcKey] || ''}`, width / 2, height - 54, width - 40,
-      22);
-    ctx.textAlign = 'left';
-  }
-
-  function drawPhoneScreen(phone, chapterKey, npcKey, tSeconds, swipeStart) {
-    if (!phone || !phone.userData) return;
-    const { ctx, canvas, texture } = phone.userData;
-    const width = canvas.width;
-    const height = canvas.height;
-    const swipeElapsed = performance.now() - swipeStart;
-    const swipeProgress = Math.min(1, swipeElapsed / 550);
-    const slide = (1 - easeOutCubic(swipeProgress)) * width * 0.15;
-
-    ctx.fillStyle = '#0b0d12';
-    ctx.fillRect(0, 0, width, height);
-
-    ctx.save();
-    ctx.translate(0, slide);
-    if (chapterKey === 'phone') {
-      const captionText = dom.caption ? dom.caption.textContent : '';
-      drawPhoneFeedChrome(ctx, width, height, tSeconds, npcKey, captionText);
-    } else {
-      drawGenericChapterPanel(ctx, chapterKey, npcKey, tSeconds, width, height);
-    }
-    ctx.restore();
-
-    texture.needsUpdate = true;
-  }
-
-  // ----------------------------------------------------------------------
-  // Brain point cloud (REAL MaleCNS soma coordinates; cosmetic pulse only)
-  // ----------------------------------------------------------------------
-  async function loadNeurons() {
-    const response = await fetch(ENDPOINTS.neurons);
     if (!response.ok) {
-      throw new Error(`GET ${ENDPOINTS.neurons} failed with status ${response.status}`);
+      throw new Error(`HTTP ${response.status}`);
     }
-    const data = await response.json();
-    if (!data || !Array.isArray(data.points) || data.points.length === 0) {
-      throw new Error('Neuron response contained no points.');
+    let payload;
+    try {
+      payload = await response.json();
+    } catch (err) {
+      throw new Error('ответ /api/neurons не является корректным JSON');
     }
-    return data;
+    if (!payload || !Array.isArray(payload.points) || payload.points.length === 0) {
+      throw new Error('/api/neurons вернул пустой набор точек');
+    }
+    return payload;
   }
 
-  const BRAIN_VERTEX_SHADER = `
-    attribute float pulseSeed;
-    uniform float uTime;
-    uniform float uMood;
-    varying float vPulse;
-    void main() {
-      float pulse = 0.5 + 0.5 * sin(uTime * (1.5 + uMood * 2.0) + pulseSeed * 6.2831);
-      vPulse = pulse;
-      vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-      gl_PointSize = (1.6 + pulse * 1.4) * (200.0 / -mvPosition.z);
-      gl_Position = projectionMatrix * mvPosition;
-    }
-  `;
+  function buildBrainPointCloud(payload) {
+    const points = payload.points;
+    const count = points.length;
+    const positions = new Float32Array(count * 3);
+    const colors = new Float32Array(count * 3);
+    const glow = new Float32Array(count);
+    const indexOrder = new Array(count);
 
-  const BRAIN_FRAGMENT_SHADER = `
-    varying float vPulse;
-    void main() {
-      vec3 gold = vec3(1.0, 0.72, 0.13);
-      vec3 cyan = vec3(0.0, 0.95, 1.0);
-      vec3 color = mix(cyan, gold, vPulse);
-      float d = length(gl_PointCoord - vec2(0.5));
-      float alpha = smoothstep(0.5, 0.1, d);
-      gl_FragColor = vec4(color, alpha * (0.5 + vPulse * 0.5));
-    }
-  `;
-
-  function buildBrainPoints(neuronData) {
-    const points = neuronData.points;
-    const positions = new Float32Array(points.length * 3);
-    const seeds = new Float32Array(points.length);
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ =
-      Infinity, maxZ = -Infinity;
-    points.forEach((p) => {
+    let minX = Infinity, maxX = -Infinity;
+    let minY = Infinity, maxY = -Infinity;
+    let minZ = Infinity, maxZ = -Infinity;
+    for (let i = 0; i < count; i++) {
+      const p = points[i];
       minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
       minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
       minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z);
-    });
+    }
     const spanX = Math.max(1e-6, maxX - minX);
     const spanY = Math.max(1e-6, maxY - minY);
     const spanZ = Math.max(1e-6, maxZ - minZ);
-    const targetSpan = 6;
-    const scale = targetSpan / Math.max(spanX, spanY, spanZ);
+    const span = Math.max(spanX, spanY, spanZ);
     const cx = (minX + maxX) / 2;
     const cy = (minY + maxY) / 2;
     const cz = (minZ + maxZ) / 2;
 
-    points.forEach((p, i) => {
-      positions[i * 3] = (p.x - cx) * scale;
-      positions[i * 3 + 1] = (p.y - cy) * scale;
-      positions[i * 3 + 2] = (p.z - cz) * scale;
-      seeds[i] = Math.random();
-    });
+    for (let i = 0; i < count; i++) {
+      const p = points[i];
+      positions[i * 3] = ((p.x - cx) / span) * 2.2;
+      positions[i * 3 + 1] = ((p.y - cy) / span) * 2.2;
+      positions[i * 3 + 2] = ((p.z - cz) / span) * 2.2;
+      colors[i * 3] = 0.0;
+      colors[i * 3 + 1] = 0.85;
+      colors[i * 3 + 2] = 1.0;
+      indexOrder[i] = typeof p.index === 'number' ? p.index : i;
+    }
 
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    geometry.setAttribute('pulseSeed', new THREE.BufferAttribute(seeds, 1));
+    const colorAttr = new THREE.BufferAttribute(colors, 3);
+    geometry.setAttribute('color', colorAttr);
 
-    const material = new THREE.ShaderMaterial({
-      vertexShader: BRAIN_VERTEX_SHADER,
-      fragmentShader: BRAIN_FRAGMENT_SHADER,
-      uniforms: {
-        uTime: { value: 0 },
-        uMood: { value: 0.2 },
-      },
+    const material = new THREE.PointsMaterial({
+      size: 0.028,
+      vertexColors: true,
       transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
+      opacity: 0.9,
+      sizeAttenuation: true,
     });
 
-    return new THREE.Points(geometry, material);
+    const pointCloud = new THREE.Points(geometry, material);
+    brain.points = pointCloud;
+    brain.colorAttr = colorAttr;
+    brain.glow = glow;
+    brain.indexOrder = indexOrder;
+    brain.scene.add(pointCloud);
+
+    if (dom.sourceLabel) {
+      dom.sourceLabel.textContent = `${payload.source || payload.dataset || 'MaleCNS'} · ${payload.total || count} нейронов (выборка ${count})`;
+    }
   }
 
-  // ----------------------------------------------------------------------
-  // Oscilloscope (modeled, not measured) 89.3 -> 125-140 Hz excited band
-  // ----------------------------------------------------------------------
-  const scopeState = { exciteUntil: 0 };
-
-  function triggerScopeExcite() {
-    scopeState.exciteUntil = performance.now() + 2400;
+  function createBrainScene() {
+    if (!dom.brainCanvas) return;
+    brain.scene = new THREE.Scene();
+    brain.camera = new THREE.PerspectiveCamera(50, 4 / 3, 0.05, 20);
+    brain.camera.position.set(0, 0.4, 3.4);
+    brain.camera.lookAt(0, 0, 0);
+    brain.renderer = makeRenderer(dom.brainCanvas);
   }
 
-  function drawOscilloscope(ctx, width, height, tSeconds) {
-    const excited = performance.now() < scopeState.exciteUntil;
-    const baseHz = 89.3;
-    const excitedHz = 125 + 15 * Math.sin(tSeconds * 0.7);
-    const freq = excited ? excitedHz : baseHz;
+  function updateBrainColors(displaySpikes, dt) {
+    if (!brain.colorAttr || !brain.glow) return;
+    const glow = brain.glow;
+    const colors = brain.colorAttr.array;
+    const decay = Math.pow(0.02, dt); // fast decay so spikes read as flashes
+    const n = glow.length;
+    for (let i = 0; i < n; i++) {
+      if (displaySpikes && displaySpikes[i]) glow[i] = 1;
+      else glow[i] *= decay;
+      const g = glow[i];
+      colors[i * 3] = g * 1.0; // red channel ramps toward gold
+      colors[i * 3 + 1] = 0.85 - g * 0.13; // green stays high (cyan+gold both high-G)
+      colors[i * 3 + 2] = 1.0 - g * 0.99; // blue drops out as it goes gold
+    }
+    brain.colorAttr.needsUpdate = true;
+  }
 
-    ctx.fillStyle = 'rgba(4,10,14,0.9)';
+  function renderBrainScene(t) {
+    if (!brain.renderer || !brain.scene || !brain.camera) return;
+    fitRendererToCanvas(brain.renderer, brain.camera, dom.brainCanvas);
+    if (brain.points) brain.points.rotation.y = t * brain.rotationSpeed;
+    brain.renderer.render(brain.scene, brain.camera);
+  }
+
+  function updateBrainProgress(fraction, message) {
+    const pct = Math.max(0, Math.min(100, Math.round((fraction || 0) * 100)));
+    if (dom.brainProgressFill) dom.brainProgressFill.style.width = `${pct}%`;
+    if (dom.brainProgressText) {
+      dom.brainProgressText.textContent = message ? `${message} (${pct}%)` : `${pct}%`;
+    }
+  }
+
+  function drawOscilloscope(ctx, width, height, value, hasSim) {
+    ctx.clearRect(0, 0, width, height);
+    ctx.fillStyle = '#04060a';
     ctx.fillRect(0, 0, width, height);
 
-    ctx.strokeStyle = 'rgba(0,243,255,0.15)';
-    ctx.lineWidth = 1;
-    for (let i = 1; i < 4; i++) {
-      const y = (height / 4) * i;
-      ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.lineTo(width, y);
-      ctx.stroke();
+    const hist = brain.oscHistory;
+    if (hasSim) {
+      hist.copyWithin(0, 1);
+      hist[hist.length - 1] = value;
+      brain.oscHistoryFilled = Math.min(hist.length, brain.oscHistoryFilled + 1);
     }
 
-    ctx.strokeStyle = excited ? '#ffb703' : '#00f3ff';
-    ctx.lineWidth = 2;
+    ctx.strokeStyle = hasSim ? '#00f3ff' : 'rgba(139, 163, 191, 0.4)';
+    ctx.lineWidth = 1.5;
     ctx.beginPath();
-    const amplitude = excited ? height * 0.32 : height * 0.2;
-    for (let x = 0; x <= width; x += 2) {
-      const phase = (x / width) * Math.PI * 2 * (freq / 20) + tSeconds * 4;
-      const noise = excited ? (Math.random() - 0.5) * 6 : (Math.random() - 0.5) * 2;
-      const y = height / 2 + Math.sin(phase) * amplitude + noise;
-      if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    const usable = hasSim ? brain.oscHistoryFilled : hist.length;
+    const maxVal = hasSim ? Math.max(1, ...Array.from(hist)) : 1;
+    for (let i = 0; i < hist.length; i++) {
+      const x = (i / (hist.length - 1)) * width;
+      const v = hasSim ? hist[i] / maxVal : 0.5;
+      const y = height - v * (height - 8) - 4;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
     }
     ctx.stroke();
 
-    if (dom.telemetryRate) {
-      dom.telemetryRate.textContent = `${freq.toFixed(1)} Hz (modeled)`;
+    ctx.fillStyle = hasSim ? '#8fa3bf' : '#5b6b82';
+    ctx.font = '10px "JetBrains Mono", monospace';
+    ctx.fillText(hasSim ? 'PAM, рассчитано моделью' : 'нет данных', 6, 12);
+  }
+
+  let rasterOffscreen = null;
+  function drawRaster(ctx, width, height, rasterBits, hasSim) {
+    if (!rasterOffscreen || rasterOffscreen.width !== width || rasterOffscreen.height !== height) {
+      rasterOffscreen = document.createElement('canvas');
+      rasterOffscreen.width = width;
+      rasterOffscreen.height = height;
+      const octx = rasterOffscreen.getContext('2d');
+      octx.fillStyle = '#04060a';
+      octx.fillRect(0, 0, width, height);
     }
-    return freq;
-  }
+    const octx = rasterOffscreen.getContext('2d');
+    // Scroll the persistent buffer left by 2px.
+    octx.drawImage(rasterOffscreen, -2, 0);
+    octx.fillStyle = '#04060a';
+    octx.fillRect(width - 2, 0, 2, height);
 
-  // ----------------------------------------------------------------------
-  // Raster (modeled 96-channel layout, 48 sampled rows drawn)
-  // ----------------------------------------------------------------------
-  const rasterState = { burstUntil: 0 };
-
-  function triggerRasterBurst() {
-    rasterState.burstUntil = performance.now() + 2000;
-  }
-
-  function drawRaster(ctx, width, height, tSeconds) {
-    ctx.fillStyle = 'rgba(4,10,14,0.9)';
-    ctx.fillRect(0, 0, width, height);
-    const bursting = performance.now() < rasterState.burstUntil;
-    const rowHeight = height / RASTER_ROWS;
-    const density = bursting ? 0.22 : 0.06;
-    ctx.fillStyle = bursting ? 'rgba(255,183,3,0.85)' : 'rgba(0,243,255,0.7)';
-    for (let row = 0; row < RASTER_ROWS; row++) {
-      for (let x = 0; x < width; x += 3) {
-        const seed = Math.sin(row * 12.9898 + x * 78.233 + Math.floor(tSeconds * 8)) *
-          43758.5453;
-        const rnd = seed - Math.floor(seed);
-        if (rnd < density) {
-          ctx.fillRect(x, row * rowHeight, 2, Math.max(1, rowHeight - 1));
+    if (hasSim && rasterBits && rasterBits.length) {
+      const rowH = height / rasterBits.length;
+      for (let r = 0; r < rasterBits.length; r++) {
+        if (rasterBits[r]) {
+          octx.fillStyle = '#ffb703';
+          octx.fillRect(width - 2, r * rowH, 2, Math.max(1, rowH - 0.5));
         }
       }
     }
+
+    ctx.clearRect(0, 0, width, height);
+    ctx.drawImage(rasterOffscreen, 0, 0);
+    ctx.fillStyle = hasSim ? '#8fa3bf' : '#5b6b82';
+    ctx.font = '10px "JetBrains Mono", monospace';
+    ctx.fillText(hasSim ? '48 нейронов растра' : 'нет данных', 6, height - 6);
   }
 
-  // ----------------------------------------------------------------------
-  // Audio: real WebAudio 140 BPM procedural loop feeding the equalizer
-  // ----------------------------------------------------------------------
-  const audioState = {
-    context: null,
-    analyser: null,
-    freqData: null,
-    started: false,
-    stepIndex: 0,
-    nextStepTime: 0,
+  function formatSpikesPerSecond(n) {
+    if (!Number.isFinite(n)) return '— спайков/с';
+    if (n >= 1e6) return `${(n / 1e6).toFixed(2)}M спайков/с`;
+    if (n >= 1e3) return `${(n / 1e3).toFixed(2)}K спайков/с`;
+    return `${Math.round(n)} спайков/с`;
+  }
+
+  // =========================================================================
+  // NEURO SIM (neuro_sim.js), loaded dynamically, never fabricated on failure
+  // =========================================================================
+  let neuroSim = null;
+  let neuroSimFailed = false;
+
+  async function loadNeuroSim(displayIndices) {
+    try {
+      logEvent('Загрузка модели коннектома (~80 Мб)…');
+      updateBrainProgress(0, 'Скачивание коннектома');
+      const mod = await import('./neuro_sim.js');
+      const sim = await mod.createConnectomeSim({
+        displayIndices,
+        rasterCount: RASTER_COUNT,
+        onProgress: (fraction, message) => updateBrainProgress(fraction, message),
+      });
+      updateBrainProgress(1, 'Готово');
+      if (dom.backendLabel) {
+        dom.backendLabel.textContent = `Бэкенд: ${sim.backend === 'webgpu' ? 'WebGPU' : 'CPU'}`;
+      }
+      logEvent(`Симуляция коннектома загружена: ${sim.neuronCount} нейронов, бэкенд ${sim.backend}.`);
+      return sim;
+    } catch (err) {
+      neuroSimFailed = true;
+      const msg = err && err.message ? err.message : String(err);
+      logEvent(`Симуляция коннектома недоступна: ${msg}`);
+      showErrorBanner('Симуляция коннектома недоступна: активность мозга не отображается.', false);
+      if (dom.backendLabel) dom.backendLabel.textContent = 'Бэкенд: недоступен';
+      if (dom.brainProgressText) dom.brainProgressText.textContent = 'симуляция недоступна';
+      if (dom.brainProgressFill) dom.brainProgressFill.style.width = '0%';
+      return null;
+    }
+  }
+
+  // =========================================================================
+  // WORLD (right): room + desk + laptop + fly rig + beetle overseer
+  // =========================================================================
+  const world = {
+    scene: null,
+    camera: null,
+    renderer: null,
+    clock: new THREE.Clock(),
+    deskTopY: 0.78,
+    laptopPos: new THREE.Vector3(0, 0, 0),
   };
 
-  function ensureAudioContext() {
-    if (audioState.context) return audioState.context;
-    const Ctx = window.AudioContext || window.webkitAudioContext;
-    if (!Ctx) return null;
-    const context = new Ctx();
-    const analyser = context.createAnalyser();
-    analyser.fftSize = 128;
-    analyser.connect(context.destination);
-    audioState.context = context;
-    audioState.analyser = analyser;
-    audioState.freqData = new Uint8Array(analyser.frequencyBinCount);
-    return context;
-  }
+  const fly = {
+    rig: null,
+    group: null,
+    scale: 1,
+    warnedMissingRagdoll: false,
+    warnedMissingImpulse: false,
+  };
 
-  function scheduleDrumStep(context, analyser, stepIndex, time) {
-    const isKick = stepIndex % 4 === 0;
-    const isHat = stepIndex % 2 === 1;
-    if (isKick) {
-      const osc = context.createOscillator();
-      const gain = context.createGain();
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(120, time);
-      osc.frequency.exponentialRampToValueAtTime(40, time + 0.12);
-      gain.gain.setValueAtTime(0.9, time);
-      gain.gain.exponentialRampToValueAtTime(0.001, time + 0.18);
-      osc.connect(gain).connect(analyser);
-      osc.start(time);
-      osc.stop(time + 0.2);
-    }
-    if (isHat) {
-      const bufferSize = context.sampleRate * 0.05;
-      const buffer = context.createBuffer(1, bufferSize, context.sampleRate);
-      const data = buffer.getChannelData(0);
-      for (let i = 0; i < bufferSize; i++) data[i] = (Math.random() * 2 - 1) * 0.3;
-      const noise = context.createBufferSource();
-      noise.buffer = buffer;
-      const gain = context.createGain();
-      gain.gain.setValueAtTime(0.4, time);
-      gain.gain.exponentialRampToValueAtTime(0.001, time + 0.05);
-      noise.connect(gain).connect(analyser);
-      noise.start(time);
-    }
-    if (stepIndex % 8 === 0) {
-      const osc = context.createOscillator();
-      const gain = context.createGain();
-      osc.type = 'triangle';
-      const notes = [220, 246.94, 261.63, 293.66];
-      osc.frequency.setValueAtTime(notes[(stepIndex / 8) % notes.length], time);
-      gain.gain.setValueAtTime(0.25, time);
-      gain.gain.exponentialRampToValueAtTime(0.001, time + 0.4);
-      osc.connect(gain).connect(analyser);
-      osc.start(time);
-      osc.stop(time + 0.45);
-    }
-  }
+  const beetle = {
+    group: null,
+    legs: [],
+    homeX: -2.6,
+    workX: 0.55,
+    state: 'offstage', // offstage | entering | poking | leaving
+    progress: 0,
+  };
 
-  function startSequencer() {
-    const context = ensureAudioContext();
-    if (!context || audioState.started) return;
-    audioState.started = true;
-    const stepDuration = 60 / 140 / 2; // 140 BPM, eighth notes
-    audioState.nextStepTime = context.currentTime + 0.05;
+  function createWorldScene() {
+    if (!dom.worldCanvas) return;
+    world.scene = new THREE.Scene();
+    world.scene.background = new THREE.Color(0x05070c);
+    world.scene.fog = new THREE.Fog(0x05070c, 3, 9);
 
-    function tick() {
-      if (!audioState.started) return;
-      while (audioState.nextStepTime < context.currentTime + 0.2) {
-        scheduleDrumStep(context, audioState.analyser, audioState.stepIndex,
-          audioState.nextStepTime);
-        audioState.stepIndex += 1;
-        audioState.nextStepTime += stepDuration;
-      }
-      requestAnimationFrame(tick);
-    }
-    tick();
-  }
+    world.camera = new THREE.PerspectiveCamera(45, 4 / 3, 0.05, 30);
+    world.camera.position.set(0.9, 1.35, 1.9);
+    world.camera.lookAt(0, 0.75, 0);
 
-  function stopSequencer() {
-    audioState.started = false;
-  }
+    world.renderer = makeRenderer(dom.worldCanvas);
 
-  function wireSoundToggle() {
-    if (!dom.soundToggle) return;
-    dom.soundToggle.addEventListener('click', () => {
-      const context = ensureAudioContext();
-      if (!context) {
-        setStatus('Web Audio is not available in this browser.', 'error');
-        showErrorBanner('Web Audio is not available in this browser.', false);
-        logEvent('Sound toggle failed: Web Audio unavailable');
-        return;
-      }
-      const willEnable = dom.soundToggle.getAttribute('aria-pressed') !== 'true';
-      if (willEnable) {
-        if (context.state === 'suspended') context.resume();
-        startSequencer();
-        dom.soundToggle.setAttribute('aria-pressed', 'true');
-        logEvent('Sound enabled (original 140 BPM procedural loop)');
-      } else {
-        stopSequencer();
-        dom.soundToggle.setAttribute('aria-pressed', 'false');
-        logEvent('Sound disabled');
-      }
+    const ambient = new THREE.AmbientLight(0x293040, 0.7);
+    world.scene.add(ambient);
+
+    const lamp = new THREE.PointLight(0xffd9a0, 1.4, 4.5, 2);
+    lamp.position.set(-0.35, 1.25, -0.2);
+    world.scene.add(lamp);
+
+    const rim = new THREE.DirectionalLight(0x3a5a8f, 0.35);
+    rim.position.set(2, 3, 1);
+    world.scene.add(rim);
+
+    // Floor
+    const floor = new THREE.Mesh(
+      new THREE.PlaneGeometry(8, 8),
+      new THREE.MeshStandardMaterial({ color: 0x11151d, roughness: 0.95, metalness: 0.02 }),
+    );
+    floor.rotation.x = -Math.PI / 2;
+    world.scene.add(floor);
+
+    // Back wall
+    const wall = new THREE.Mesh(
+      new THREE.PlaneGeometry(8, 4),
+      new THREE.MeshStandardMaterial({ color: 0x0c0f16, roughness: 1 }),
+    );
+    wall.position.set(0, 2, -1.4);
+    world.scene.add(wall);
+
+    // Desk
+    const deskMat = new THREE.MeshStandardMaterial({ color: 0x3a2b1e, roughness: 0.7, metalness: 0.05 });
+    const deskTop = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.05, 0.8), deskMat);
+    deskTop.position.set(0, world.deskTopY, 0);
+    world.scene.add(deskTop);
+    const legGeo = new THREE.BoxGeometry(0.06, world.deskTopY - 0.025, 0.06);
+    const legPositions = [
+      [-0.8, -0.35], [0.8, -0.35], [-0.8, 0.35], [0.8, 0.35],
+    ];
+    legPositions.forEach(([lx, lz]) => {
+      const leg = new THREE.Mesh(legGeo, deskMat);
+      leg.position.set(lx, (world.deskTopY - 0.025) / 2, lz);
+      world.scene.add(leg);
     });
+
+    // Desk lamp
+    const lampGroup = new THREE.Group();
+    const lampBase = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.09, 0.03, 16),
+      new THREE.MeshStandardMaterial({ color: 0x1c1c22, metalness: 0.6, roughness: 0.3 }));
+    const lampArm = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.5, 8),
+      new THREE.MeshStandardMaterial({ color: 0x2a2a30, metalness: 0.7, roughness: 0.25 }));
+    lampArm.position.set(0, 0.25, 0);
+    lampArm.rotation.z = 0.25;
+    const lampHead = new THREE.Mesh(new THREE.ConeGeometry(0.09, 0.14, 16, 1, true),
+      new THREE.MeshStandardMaterial({ color: 0xffe9b8, emissive: 0xffb703, emissiveIntensity: 0.6, side: THREE.DoubleSide }));
+    lampHead.position.set(0.12, 0.48, 0);
+    lampHead.rotation.x = Math.PI;
+    lampGroup.add(lampBase, lampArm, lampHead);
+    lampGroup.position.set(-0.62, world.deskTopY + 0.025, -0.22);
+    world.scene.add(lampGroup);
+
+    // Laptop base + keyboard
+    const laptopMat = new THREE.MeshStandardMaterial({ color: 0x1c1e24, metalness: 0.5, roughness: 0.4 });
+    const laptopBase = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.02, 0.3), laptopMat);
+    world.laptopPos.set(0.05, world.deskTopY + 0.035, 0.05);
+    laptopBase.position.copy(world.laptopPos);
+    world.scene.add(laptopBase);
+
+    const keyboardMat = new THREE.MeshStandardMaterial({ color: 0x14161c, roughness: 0.8 });
+    const keyboard = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.01, 0.18), keyboardMat);
+    keyboard.position.set(world.laptopPos.x, world.laptopPos.y + 0.012, world.laptopPos.z + 0.05);
+    world.scene.add(keyboard);
+
+    // Laptop screen with CanvasTexture comment feed
+    const feedCanvas = document.createElement('canvas');
+    feedCanvas.width = 512;
+    feedCanvas.height = 384;
+    const feedCtx = feedCanvas.getContext('2d');
+    const feedTexture = new THREE.CanvasTexture(feedCanvas);
+    feedTexture.colorSpace = THREE.SRGBColorSpace;
+
+    const screenGroup = new THREE.Group();
+    const screenBack = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.28, 0.015), laptopMat);
+    screenBack.position.set(0, 0.14, -0.008);
+    const screenFace = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.38, 0.24),
+      new THREE.MeshBasicMaterial({ map: feedTexture }),
+    );
+    screenFace.position.set(0, 0.14, 0.001);
+    screenGroup.add(screenBack, screenFace);
+    screenGroup.position.set(world.laptopPos.x, world.laptopPos.y + 0.01, world.laptopPos.z - 0.14);
+    screenGroup.rotation.x = -0.28;
+    world.scene.add(screenGroup);
+
+    world.feedCanvas = feedCanvas;
+    world.feedCtx = feedCtx;
+    world.feedTexture = feedTexture;
   }
 
-  // ----------------------------------------------------------------------
-  // Web Speech (opt-in, ru-RU)
-  // ----------------------------------------------------------------------
-  function speak(text) {
-    if (!('speechSynthesis' in window)) return;
-    if (!audioState.started && audioState.context && audioState.context.state !==
-      'running') {
-      // Only speak after a user gesture has already unlocked audio via the
-      // sound toggle; this keeps speech strictly opt-in.
+  function drawCommentFeedTexture(feedList, typingText, cursorOn) {
+    const ctx = world.feedCtx;
+    if (!ctx) return;
+    const w = world.feedCanvas.width;
+    const h = world.feedCanvas.height;
+
+    ctx.fillStyle = '#0a0d14';
+    ctx.fillRect(0, 0, w, h);
+
+    ctx.fillStyle = '#00f3ff';
+    ctx.font = 'bold 20px "JetBrains Mono", monospace';
+    ctx.fillText('Комментарии', 16, 30);
+    ctx.strokeStyle = 'rgba(0,243,255,0.35)';
+    ctx.beginPath();
+    ctx.moveTo(16, 42);
+    ctx.lineTo(w - 16, 42);
+    ctx.stroke();
+
+    let y = 66;
+    const visible = feedList.slice(-4);
+    visible.forEach((c) => {
+      ctx.fillStyle = '#ffb703';
+      ctx.font = 'bold 15px "JetBrains Mono", monospace';
+      ctx.fillText(c.nickname, 16, y);
+      ctx.fillStyle = '#8fa3bf';
+      ctx.font = '12px "JetBrains Mono", monospace';
+      ctx.fillText(`♥ ${c.likes}`, w - 70, y);
+      y += 20;
+      ctx.fillStyle = '#e6f1ff';
+      ctx.font = '14px Inter, sans-serif';
+      y = wrapText(ctx, c.text, 16, y, w - 32, 18) + 10;
+    });
+
+    // Currently-typing comment area at the bottom
+    ctx.strokeStyle = 'rgba(255,183,3,0.35)';
+    ctx.beginPath();
+    ctx.moveTo(16, h - 78);
+    ctx.lineTo(w - 16, h - 78);
+    ctx.stroke();
+    ctx.fillStyle = '#ffb703';
+    ctx.font = 'bold 15px "JetBrains Mono", monospace';
+    ctx.fillText(COMMENT_NICKNAME, 16, h - 56);
+    ctx.fillStyle = '#e6f1ff';
+    ctx.font = '14px Inter, sans-serif';
+    const cursor = cursorOn ? '|' : '';
+    wrapText(ctx, `${typingText}${cursor}`, 16, h - 34, w - 32, 18);
+
+    world.feedTexture.needsUpdate = true;
+  }
+
+  // -------------------------------------------------------------------------
+  // Beetle overseer: procedural primitive geometry only (never the STL rig)
+  // -------------------------------------------------------------------------
+  function buildBeetle() {
+    const group = new THREE.Group();
+    const shellMat = new THREE.MeshStandardMaterial({ color: 0x1b2a1e, metalness: 0.65, roughness: 0.25 });
+    const legMat = new THREE.MeshStandardMaterial({ color: 0x14201a, metalness: 0.4, roughness: 0.5 });
+    const eyeMat = new THREE.MeshStandardMaterial({ color: 0x7a0e12, emissive: 0x3a0508, emissiveIntensity: 0.5 });
+
+    const body = new THREE.Mesh(new THREE.SphereGeometry(0.16, 20, 16), shellMat);
+    body.scale.set(1.5, 0.85, 1.0);
+    body.position.y = 0.16;
+    group.add(body);
+
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.075, 16, 12), shellMat);
+    head.position.set(0.24, 0.17, 0);
+    group.add(head);
+
+    const eyeL = new THREE.Mesh(new THREE.SphereGeometry(0.018, 8, 8), eyeMat);
+    eyeL.position.set(0.29, 0.19, 0.045);
+    const eyeR = eyeL.clone();
+    eyeR.position.z = -0.045;
+    group.add(eyeL, eyeR);
+
+    const mandibleMat = new THREE.MeshStandardMaterial({ color: 0x0e0e12, metalness: 0.5, roughness: 0.4 });
+    const mandibleL = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.012, 0.012), mandibleMat);
+    mandibleL.position.set(0.32, 0.15, 0.02);
+    const mandibleR = mandibleL.clone();
+    mandibleR.position.z = -0.02;
+    group.add(mandibleL, mandibleR);
+
+    const antennaMat = new THREE.MeshStandardMaterial({ color: 0x1b2a1e, roughness: 0.6 });
+    const antennaL = new THREE.Mesh(new THREE.CylinderGeometry(0.004, 0.004, 0.14, 6), antennaMat);
+    antennaL.position.set(0.3, 0.24, 0.03);
+    antennaL.rotation.z = -0.5;
+    const antennaR = antennaL.clone();
+    antennaR.position.z = -0.03;
+    group.add(antennaL, antennaR);
+
+    const legs = [];
+    const legAnchorsX = [0.08, 0, -0.08];
+    legAnchorsX.forEach((lx, i) => {
+      [1, -1].forEach((side) => {
+        const legGroup = new THREE.Group();
+        const upper = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.01, 0.13, 6), legMat);
+        upper.rotation.z = side > 0 ? 1.1 : -1.1;
+        upper.position.set(0, -0.05, side * 0.06);
+        const lower = new THREE.Mesh(new THREE.CylinderGeometry(0.009, 0.006, 0.12, 6), legMat);
+        lower.position.set(0, -0.13, side * 0.13);
+        lower.rotation.z = side > 0 ? 0.5 : -0.5;
+        legGroup.add(upper, lower);
+        legGroup.position.set(lx, 0.16, side * 0.11);
+        group.add(legGroup);
+        legs.push({ group: legGroup, phase: i * 1.2 + (side > 0 ? 0 : Math.PI) });
+      });
+    });
+
+    group.visible = false;
+    group.position.set(beetle.homeX, 0, 0.55);
+    group.rotation.y = -Math.PI / 2;
+    beetle.group = group;
+    beetle.legs = legs;
+    world.scene.add(group);
+  }
+
+  function updateBeetleWalkAnimation(t, walking) {
+    if (!beetle.group) return;
+    beetle.legs.forEach((leg) => {
+      const swing = walking ? Math.sin(t * 9 + leg.phase) * 0.35 : 0;
+      leg.group.rotation.x = swing;
+    });
+    beetle.group.position.y = walking ? Math.abs(Math.sin(t * 9)) * 0.01 : 0;
+  }
+
+  // -------------------------------------------------------------------------
+  // Fly rig loading, measured scale, ragdoll/impulse guards
+  // -------------------------------------------------------------------------
+  async function initFlyRig() {
+    setStatus('Загрузка тела мухи…', 'loading');
+    let rig;
+    try {
+      rig = await loadFly(THREE, (fraction, message) => {
+        setLoadingText(`${message || 'Загрузка мухи'} (${Math.round((fraction || 0) * 100)}%)`);
+      });
+    } catch (err) {
+      const msg = err && err.message ? err.message : String(err);
+      setStatus(`Ошибка загрузки мухи: ${msg}`, 'error');
+      logEvent(`Ошибка загрузки fly_rig.js: ${msg}`);
+      showErrorBanner(`Не удалось загрузить тело мухи: ${msg}`, true);
+      return false;
+    }
+
+    fly.rig = rig;
+    fly.group = rig.group;
+
+    // Measure the loaded rig's real bounding box instead of guessing scale.
+    const box = new THREE.Box3().setFromObject(rig.group);
+    const size = new THREE.Vector3();
+    box.getSize(size);
+    const longestDim = Math.max(size.x, size.y, size.z, 1e-6);
+    fly.scale = FLY_TARGET_LENGTH / longestDim;
+    rig.group.scale.setScalar(fly.scale);
+
+    const floorYLocal = typeof rig.floorY === 'number' ? rig.floorY : 0;
+    rig.group.position.set(
+      world.laptopPos.x - 0.02,
+      world.deskTopY + 0.035 - floorYLocal * fly.scale,
+      world.laptopPos.z + 0.16,
+    );
+    rig.group.rotation.y = Math.PI;
+
+    world.scene.add(rig.group);
+
+    if (typeof rig.setRagdoll !== 'function' && !fly.warnedMissingRagdoll) {
+      fly.warnedMissingRagdoll = true;
+      logEvent('Предупреждение: fly_rig.js пока не предоставляет setRagdoll(); коллапс будет только в позе.');
+    }
+    if (typeof rig.applyImpulse !== 'function' && !fly.warnedMissingImpulse) {
+      fly.warnedMissingImpulse = true;
+      logEvent('Предупреждение: fly_rig.js пока не предоставляет applyImpulse(); толчок жука будет только визуальный.');
+    }
+
+    logEvent('Физическая модель мухи загружена.');
+    return true;
+  }
+
+  function safeSetRagdoll(weight) {
+    if (fly.rig && typeof fly.rig.setRagdoll === 'function') {
+      fly.rig.setRagdoll(weight);
+    }
+  }
+
+  function safeApplyImpulse(direction, strength) {
+    if (fly.rig && typeof fly.rig.applyImpulse === 'function') {
+      fly.rig.applyImpulse(direction, strength);
+    } else {
+      logEvent('Симуляция толчка недоступна: applyImpulse() отсутствует в fly_rig.js.');
+    }
+  }
+
+  function isFlyRagdolling() {
+    if (fly.rig && typeof fly.rig.isRagdolling === 'function') {
+      return !!fly.rig.isRagdolling();
+    }
+    return game.phase === 'collapsed' || game.phase === 'poking';
+  }
+
+  // =========================================================================
+  // GAME STATE MACHINE
+  // =========================================================================
+  const game = {
+    phase: 'typing', // typing | collapsed | beetle_waiting | beetle_entering | poking | beetle_leaving
+    fatigue: 0,
+    anger: 0,
+    commentsWritten: 0,
+    forcedCount: 0,
+    feed: [],
+    currentComment: '',
+    typedChars: 0,
+    typedCharsAccum: 0,
+    nextCommentDelayMs: 0,
+    collapseTimer: 0,
+    ragdollRamp: 0,
+    motorBaseline: null,
+    motorFactor: 1,
+    likeTickTimer: 0,
+  };
+
+  function startNewComment() {
+    game.currentComment = generateComment();
+    game.typedChars = 0;
+    game.typedCharsAccum = 0;
+  }
+
+  function postCurrentComment() {
+    const likes = Math.floor(Math.random() * 4);
+    const entry = { nickname: COMMENT_NICKNAME, text: game.currentComment, likes };
+    game.feed.push(entry);
+    if (game.feed.length > 12) game.feed.shift();
+    appendCommentToSideLog(entry.nickname, entry.text, entry.likes);
+    game.commentsWritten += 1;
+    if (dom.commentsCount) dom.commentsCount.textContent = String(game.commentsWritten);
+
+    if (neuroSim) {
+      neuroSim.stimulate('reward', 40, 400);
+    }
+
+    game.currentComment = '';
+    game.typedChars = 0;
+    game.nextCommentDelayMs = COMMENT_GAP_MS[0] + Math.random() * (COMMENT_GAP_MS[1] - COMMENT_GAP_MS[0]);
+  }
+
+  function updateTypingRate(dtSeconds) {
+    if (!neuroSim) {
+      game.motorFactor = 1;
       return;
     }
-    try {
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.lang = 'ru-RU';
-      window.speechSynthesis.speak(utterance);
-    } catch (err) {
-      // Speech is a non-critical enhancement; failures should not surface as
-      // a fatal error.
-      logEvent(`Speech synthesis unavailable: ${err.message}`);
+    const summary = neuroSim.getSummary();
+    const motorRate = (summary.groupRates && summary.groupRates.motor) || 0;
+    if (game.motorBaseline === null) {
+      game.motorBaseline = Math.max(1, motorRate);
+    } else if (game.phase === 'typing') {
+      const w = Math.min(1, MOTOR_BASELINE_SMOOTHING * dtSeconds * 60);
+      game.motorBaseline = game.motorBaseline * (1 - w) + motorRate * w;
     }
+    const ratio = motorRate / Math.max(1, game.motorBaseline);
+    game.motorFactor = Math.max(0.5, Math.min(2, ratio));
+
+    const angerHz = ((summary.groupRates && summary.groupRates.dan) || 0) +
+      ((summary.groupRates && summary.groupRates.pam) || 0);
+    game.anger = Math.max(0, Math.min(100, (angerHz / 2 / 150) * 100));
   }
 
-  // ----------------------------------------------------------------------
-  // Chat: POST /api/chat with throttling, timeout, exact NPC whitelist
-  // ----------------------------------------------------------------------
-  const chatState = { lastRequestAt: 0, abortController: null };
-
-  function pickChapterLine(chapterKey) {
-    const lines = CHAPTER_LINES[chapterKey] || CHAPTER_LINES.street;
-    return lines[Math.floor(Math.random() * lines.length)];
-  }
-
-  async function requestNpcReply(npcKey, chapterKey) {
-    const npcName = NPC_NAMES[npcKey];
-    if (!npcName) return;
-    const now = performance.now();
-    if (now - chatState.lastRequestAt < CHAT_MIN_INTERVAL_MS) return;
-    chatState.lastRequestAt = now;
-
-    if (chatState.abortController) chatState.abortController.abort();
-    const controller = new AbortController();
-    chatState.abortController = controller;
-    const timeoutId = setTimeout(() => controller.abort(), CHAT_TIMEOUT_MS);
-
-    const message = pickChapterLine(chapterKey);
-    showCaption(npcName, null);
-    logEvent(`Chat request sent to ${npcName}`);
-
-    try {
-      const response = await fetch(ENDPOINTS.chat, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: npcName, message }),
-        signal: controller.signal,
-      });
-      if (!response.ok) {
-        throw new Error(`POST ${ENDPOINTS.chat} failed with status ${response.status}`);
+  function stepTyping(dtSeconds) {
+    if (!game.currentComment) {
+      if (game.nextCommentDelayMs > 0) {
+        game.nextCommentDelayMs -= dtSeconds * 1000;
+        return;
       }
-      const data = await response.json();
-      const reply = data && (data.reply || data.text || data.message);
-      if (!reply) throw new Error('Chat response contained no reply text.');
-      showCaption(npcName, reply);
-      logEvent(`${npcName} replied: “${String(reply).slice(0, 60)}${reply.length > 60 ?
-        '…' : ''}”`);
-      speak(reply);
-      if (!fatalErrorActive) setStatus('Simulation running.', 'ready');
-    } catch (err) {
-      if (err && err.name === 'AbortError') return;
-      const msg = `Chat with ${npcName} unavailable: ${err.message}`;
-      showCaption(npcName, null);
-      if (!fatalErrorActive) setStatus(msg, 'error');
-      showErrorBanner(msg, false);
-      logEvent(msg);
-    } finally {
-      clearTimeout(timeoutId);
+      startNewComment();
     }
+
+    const rate = BASE_TYPING_CHARS_PER_SEC * game.motorFactor * (1 - game.fatigue * 0.5);
+    game.typedCharsAccum += Math.max(0.2, rate) * dtSeconds;
+    const targetChars = Math.min(game.currentComment.length, Math.floor(game.typedCharsAccum));
+
+    while (game.typedChars < targetChars) {
+      game.typedChars += 1;
+      game.fatigue = Math.min(1.4, game.fatigue + FATIGUE_PER_KEYSTROKE);
+      playKeyClick();
+      if (neuroSim) neuroSim.stimulate('screen', 8, 120);
+    }
+
+    if (game.typedChars >= game.currentComment.length) {
+      postCurrentComment();
+    }
+
+    game.fatigue = Math.min(1.4, game.fatigue + FATIGUE_PER_SECOND_TYPING * dtSeconds);
+    game.fatigue = Math.max(0, game.fatigue - FATIGUE_RECOVERY_PER_SECOND * dtSeconds);
   }
 
-  // ----------------------------------------------------------------------
-  // Autopilot: fly movement, chapter cycling, motor telemetry
-  // ----------------------------------------------------------------------
-  const autopilot = {
-    flyPos: new THREE.Vector3(0, 1.6, 0),
-    flyHeading: 0,
-    chapterIndex: 0,
-    currentChapter: CHAPTER_ORDER[0],
-    currentNpcKey: 'zina',
-    mood: 'neutral',
-    walk: 0.4,
-    turn: 0,
-    escape: 0,
-    nextChangeAt: 0,
-    swipeStart: 0,
-    autoplayEnabled: true,
-  };
+  function enterCollapse() {
+    game.phase = 'collapsed';
+    game.collapseTimer = 0;
+    safeSetRagdoll(1);
+    setStatus('Муха выдохлась.', 'error');
+    logEvent('Муха выдохлась и рушилась.');
+  }
 
-  function pickNpcForChapter(chapterKey) {
-    const info = CHAPTER_INFO[chapterKey];
-    if (!info) return NPC_PLACES[0].key;
-    let nearest = NPC_PLACES[0];
-    let nearestDist = Infinity;
-    NPC_PLACES.forEach((place) => {
-      const dist = place.position.distanceTo(info.target);
-      if (dist < nearestDist) {
-        nearestDist = dist;
-        nearest = place;
+  function startBeetleEntry() {
+    game.phase = 'beetle_entering';
+    beetle.state = 'entering';
+    beetle.progress = 0;
+    if (beetle.group) beetle.group.visible = true;
+    logEvent('Жук-надзиратель идёт к мухе.');
+  }
+
+  function performPoke() {
+    game.phase = 'poking';
+    if (dom.subtitle) dom.subtitle.textContent = pickBeetleLine();
+    playStartleSting();
+    const dir = new THREE.Vector3(0, 0.6, -0.7).normalize();
+    safeApplyImpulse(dir, 2.4);
+    if (neuroSim) neuroSim.stimulate('startle', 60, 250);
+    game.forcedCount += 1;
+    if (dom.forcedCount) dom.forcedCount.textContent = String(game.forcedCount);
+    game.ragdollRamp = 1;
+    setStatus('жук-надзиратель заставляет муху работать.', 'loading');
+  }
+
+  function stepBeetlePhase(dtSeconds) {
+    if (game.phase === 'beetle_entering') {
+      beetle.progress += dtSeconds / 2.4;
+      const p = Math.min(1, beetle.progress);
+      if (beetle.group) {
+        beetle.group.position.x = beetle.homeX + (beetle.workX - beetle.homeX) * p;
       }
-    });
-    return nearest.key;
-  }
-
-  function moodToScalar(mood) {
-    const scale = {
-      calm: 0.05,
-      neutral: 0.2,
-      curious: 0.35,
-      excited: 0.6,
-      agitated: 0.8,
-      aggressive: 1.0,
-    };
-    return scale[mood] !== undefined ? scale[mood] : 0.2;
-  }
-
-  function renderChapterList() {
-    if (!dom.chapterList) return;
-    dom.chapterList.innerHTML = '';
-    CHAPTER_ORDER.forEach((key, idx) => {
-      const info = CHAPTER_INFO[key];
-      const li = document.createElement('li');
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'chapter-item';
-      button.textContent = `${idx + 1}. ${info.label}`;
-      button.dataset.chapterKey = key;
-      button.setAttribute('aria-current', 'false');
-      button.addEventListener('click', () => {
-        enterChapter(idx, { manual: true });
-      });
-      li.appendChild(button);
-      dom.chapterList.appendChild(li);
-    });
-    updateChapterListUI();
-  }
-
-  function updateChapterListUI() {
-    if (!dom.chapterList) return;
-    const buttons = dom.chapterList.querySelectorAll('.chapter-item');
-    buttons.forEach((button, idx) => {
-      const isActive = idx === autopilot.chapterIndex;
-      button.setAttribute('aria-current', isActive ? 'true' : 'false');
-      button.classList.toggle('is-active', isActive);
-    });
-  }
-
-  function enterChapter(index, options) {
-    const opts = options || {};
-    const total = CHAPTER_ORDER.length;
-    autopilot.chapterIndex = ((Math.round(index) % total) + total) % total;
-    const chapterKey = CHAPTER_ORDER[autopilot.chapterIndex];
-    autopilot.currentChapter = chapterKey;
-    autopilot.currentNpcKey = pickNpcForChapter(chapterKey);
-    autopilot.mood = (chapterKey === 'car' || chapterKey === 'skate') ? 'excited' :
-      'neutral';
-    autopilot.swipeStart = performance.now();
-
-    const info = CHAPTER_INFO[chapterKey];
-    if (dom.chapterName) dom.chapterName.textContent = info.label;
-    updateChapterListUI();
-
-    triggerScopeExcite();
-    triggerRasterBurst();
-    requestNpcReply(autopilot.currentNpcKey, chapterKey);
-    logEvent(`${opts.manual ? 'Manual jump' : 'Auto-advance'} to chapter: ${info.label}`);
-
-    const [minMs, maxMs] = CHAPTER_DURATIONS[chapterKey] || [CHAPTER_MIN_MS,
-      CHAPTER_MAX_MS];
-    const delay = minMs + Math.random() * (maxMs - minMs);
-    autopilot.nextChangeAt = performance.now() + delay;
-  }
-
-  function wireChapterControls() {
-    if (dom.chapterPrev) {
-      dom.chapterPrev.addEventListener('click', () => {
-        enterChapter(autopilot.chapterIndex - 1, { manual: true });
-      });
+      updateBeetleWalkAnimation(world.clock.getElapsedTime(), true);
+      if (p >= 1) {
+        performPoke();
+      }
+      return;
     }
-    if (dom.chapterNext) {
-      dom.chapterNext.addEventListener('click', () => {
-        enterChapter(autopilot.chapterIndex + 1, { manual: true });
-      });
+
+    if (game.phase === 'poking') {
+      game.ragdollRamp = Math.max(0, game.ragdollRamp - dtSeconds * (1000 / RAGDOLL_RECOVER_DURATION_MS));
+      safeSetRagdoll(game.ragdollRamp);
+      updateBeetleWalkAnimation(world.clock.getElapsedTime(), false);
+      if (game.ragdollRamp <= 0) {
+        game.fatigue = RESUME_FATIGUE;
+        game.phase = 'beetle_leaving';
+        beetle.progress = 0;
+        setStatus('Муха вернулась к работе.', 'ready');
+        logEvent('Муха вернулась к комментариям.');
+        if (dom.subtitle) dom.subtitle.textContent = '';
+      }
+      return;
     }
-    if (dom.chapterAutoplay) {
-      dom.chapterAutoplay.addEventListener('click', () => {
-        autopilot.autoplayEnabled = !autopilot.autoplayEnabled;
-        dom.chapterAutoplay.setAttribute('aria-pressed', autopilot.autoplayEnabled ?
-          'true' : 'false');
-        logEvent(`Autoplay ${autopilot.autoplayEnabled ? 'enabled' : 'disabled'}`);
-        if (autopilot.autoplayEnabled) {
-          const [minMs] = CHAPTER_DURATIONS[autopilot.currentChapter] || [
-            CHAPTER_MIN_MS];
-          autopilot.nextChangeAt = performance.now() + minMs;
-        }
-      });
-    }
-  }
 
-  // Motor sliders are read-only telemetry: block direct interaction and
-  // announce that via aria-readonly, while still visually animating each
-  // frame from updateMotorTelemetry().
-  function markMotorControlsReadOnly() {
-    [dom.motorWalk, dom.motorTurn, dom.motorEscape].forEach((el) => {
-      if (!el) return;
-      el.setAttribute('aria-readonly', 'true');
-      el.addEventListener('pointerdown', (e) => e.preventDefault());
-      el.addEventListener('keydown', (e) => e.preventDefault());
-    });
-  }
-
-  function updateMotorTelemetry() {
-    if (dom.motorWalk) {
-      const value = String(Math.round(autopilot.walk * 100));
-      dom.motorWalk.value = value;
-      dom.motorWalk.setAttribute('aria-valuenow', value);
-    }
-    if (dom.motorTurn) {
-      const value = String(Math.round(autopilot.turn * 100));
-      dom.motorTurn.value = value;
-      dom.motorTurn.setAttribute('aria-valuenow', value);
-    }
-    if (dom.motorEscape) {
-      const value = String(Math.round(autopilot.escape * 100));
-      dom.motorEscape.value = value;
-      dom.motorEscape.setAttribute('aria-valuenow', value);
-    }
-  }
-
-  function updateFlyAutopilot(dt) {
-    const info = CHAPTER_INFO[autopilot.currentChapter];
-    if (!info) return;
-    const toTarget = info.target.clone().sub(autopilot.flyPos);
-    const distance = toTarget.length();
-    const desiredHeading = Math.atan2(toTarget.x, toTarget.z);
-    let deltaHeading = desiredHeading - autopilot.flyHeading;
-    while (deltaHeading > Math.PI) deltaHeading -= Math.PI * 2;
-    while (deltaHeading < -Math.PI) deltaHeading += Math.PI * 2;
-
-    const turnRate = 2.2;
-    autopilot.flyHeading += Math.max(-turnRate * dt, Math.min(turnRate * dt,
-      deltaHeading));
-    autopilot.turn = Math.max(-1, Math.min(1, deltaHeading / 0.6));
-
-    const closeness = Math.min(1, distance / 6);
-    autopilot.walk = 0.25 + closeness * 0.75;
-    autopilot.escape = distance < 0.8 ? 0.15 : 0.0;
-
-    const speed = autopilot.walk * 2.4;
-    autopilot.flyPos.x += Math.sin(autopilot.flyHeading) * speed * dt;
-    autopilot.flyPos.z += Math.cos(autopilot.flyHeading) * speed * dt;
-    autopilot.flyPos.y += (info.target.y - autopilot.flyPos.y) * Math.min(1, dt * 1.5);
-
-    updateMotorTelemetry();
-  }
-
-  // ----------------------------------------------------------------------
-  // Prop animation (skateboard wheels, car wheels)
-  // ----------------------------------------------------------------------
-  function animateProps(skateboard, car, dt, chapterKey) {
-    if (skateboard && skateboard.userData.wheels) {
-      const speed = chapterKey === 'skate' ? 10 : 1.5;
-      skateboard.userData.wheels.forEach((wheel) => { wheel.rotation.x += speed * dt; });
-    }
-    if (car && car.userData.wheels) {
-      const speed = chapterKey === 'car' ? 6 : 0.4;
-      car.userData.wheels.forEach((wheel) => { wheel.rotation.y += speed * dt; });
-    }
-  }
-
-  // ----------------------------------------------------------------------
-  // Main
-  // ----------------------------------------------------------------------
-  function main() {
-    setStatus('Booting Flying Fly simulation…', 'loading');
-    logEvent('Booting simulation');
-
-    buildEqualizerBars();
-    markMotorControlsReadOnly();
-    wireSoundToggle();
-    wireChapterControls();
-    renderChapterList();
-    setup2dCanvasSizing();
-
-    // Brain scene
-    const brainRenderer = makeRenderer(dom.brainCanvas);
-    const brainScene = new THREE.Scene();
-    const brainCamera = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
-    brainCamera.position.set(0, 0, 9);
-    brainScene.add(new THREE.AmbientLight(0x445566, 1.2));
-    let brainPoints = null;
-
-    // World scene
-    const worldRenderer = makeRenderer(dom.worldCanvas);
-    const worldScene = new THREE.Scene();
-    const worldCamera = new THREE.PerspectiveCamera(46, 1, 0.05, 200);
-    worldScene.add(new THREE.HemisphereLight(0xbfd9ff, 0x1a1a1a, 0.9));
-    const sun = new THREE.DirectionalLight(0xffffff, 1.1);
-    sun.position.set(10, 16, 6);
-    worldScene.add(sun);
-
-    buildStreet(worldScene);
-    buildNpcMarkers(worldScene);
-    const skateboard = buildSkateboard();
-    skateboard.position.set(-2, 0, -1);
-    worldScene.add(skateboard);
-    const car = buildCar();
-    worldScene.add(car);
-    const podium = buildPodium();
-    worldScene.add(podium);
-    const phoneProp = buildPhoneProp();
-    worldScene.add(phoneProp);
-
-    let flyRig = null;
-    let flyOk = false;
-    let neuronsOk = false;
-
-    async function initFly() {
-      try {
-        const rig = await loadFly(THREE, (progress) => {
-          setStatus(`Loading fly body model… ${Math.round((progress || 0) * 100)}%`,
-            'loading');
-        });
-        flyRig = rig;
-        worldScene.add(rig.group);
-        flyOk = true;
-        logEvent('Fly body model loaded');
-      } catch (err) {
-        flyOk = false;
-        const msg = `Fly body model failed to load: ${err.message}`;
-        logEvent(msg);
-        showErrorBanner(msg, true);
+    if (game.phase === 'beetle_leaving') {
+      beetle.progress += dtSeconds / 2.0;
+      const p = Math.min(1, beetle.progress);
+      if (beetle.group) {
+        beetle.group.position.x = beetle.workX + (beetle.homeX - beetle.workX) * p;
+      }
+      updateBeetleWalkAnimation(world.clock.getElapsedTime(), true);
+      if (p >= 1) {
+        if (beetle.group) beetle.group.visible = false;
+        game.phase = 'typing';
       }
     }
-
-    async function initNeurons() {
-      if (dom.sourceLabel) dom.sourceLabel.textContent = 'Loading MaleCNS neuron sample…';
-      try {
-        const data = await loadNeurons();
-        brainPoints = buildBrainPoints(data);
-        brainScene.add(brainPoints);
-        if (dom.sourceLabel) {
-          dom.sourceLabel.textContent = `${data.total || data.points.length} neurons · ${
-            data.source || 'MaleCNS v1.0'}`;
-        }
-        neuronsOk = true;
-        logEvent(`Neuron sample loaded: ${data.points.length} points from ${data.source ||
-          'MaleCNS v1.0'}`);
-      } catch (err) {
-        neuronsOk = false;
-        if (dom.sourceLabel) dom.sourceLabel.textContent = 'Neuron data unavailable.';
-        const msg = `Neuron data failed to load: ${err.message}`;
-        logEvent(msg);
-        showErrorBanner(msg, true);
-      }
-    }
-
-    // Initial chapter + camera framing before the first frame, to avoid a
-    // visible pop when the close-follow camera engages.
-    enterChapter(0);
-    const firstOffset = CHAPTER_CAMERA_OFFSET[autopilot.currentChapter] ||
-      CHAPTER_CAMERA_OFFSET.street;
-    worldCamera.position.copy(autopilot.flyPos.clone().add(firstOffset));
-    worldCamera.lookAt(autopilot.flyPos);
-
-    Promise.all([initFly(), initNeurons()]).then(() => {
-      hideLoadingScreen();
-      if (flyOk && neuronsOk) {
-        setStatus('Simulation running.', 'ready');
-      } else {
-        const parts = [];
-        if (!flyOk) parts.push('fly body model failed to load');
-        if (!neuronsOk) parts.push('neuron data failed to load');
-        const msg = `Simulation running with errors: ${parts.join('; ')}.`;
-        fatalErrorActive = true;
-        setStatus(msg, 'error');
-        showErrorBanner(msg, true);
-      }
-    });
-
-    const scopeCtx = dom.scopeCanvas ? dom.scopeCanvas.getContext('2d') : null;
-    const rasterCtx = dom.rasterCanvas ? dom.rasterCanvas.getContext('2d') : null;
-
-    let running = true;
-    let lastFrame = performance.now();
-
-    function pauseAnimation() {
-      running = false;
-      if (!fatalErrorActive) setStatus('Paused (tab hidden).', 'loading');
-      logEvent('Paused: tab hidden');
-    }
-
-    function resumeAnimation() {
-      if (running) return;
-      running = true;
-      lastFrame = performance.now();
-      if (!fatalErrorActive) setStatus('Simulation running.', 'ready');
-      logEvent('Resumed: tab visible');
-      requestAnimationFrame(animate);
-    }
-
-    document.addEventListener('visibilitychange', () => {
-      if (document.hidden) pauseAnimation(); else resumeAnimation();
-    });
-
-    function animate(now) {
-      if (!running) return;
-      const dt = Math.min(0.05, Math.max(0.001, (now - lastFrame) / 1000));
-      lastFrame = now;
-      const tSeconds = now / 1000;
-
-      fitRendererToCanvas(brainRenderer, brainCamera, dom.brainCanvas);
-      fitRendererToCanvas(worldRenderer, worldCamera, dom.worldCanvas);
-
-      if (brainPoints && brainPoints.material.uniforms) {
-        brainPoints.material.uniforms.uTime.value = tSeconds;
-        brainPoints.material.uniforms.uMood.value = moodToScalar(autopilot.mood);
-        brainPoints.rotation.y += dt * 0.08;
-      }
-      if (brainRenderer) brainRenderer.render(brainScene, brainCamera);
-
-      if (autopilot.autoplayEnabled && now >= autopilot.nextChangeAt) {
-        enterChapter(autopilot.chapterIndex + 1);
-      }
-      updateFlyAutopilot(dt);
-
-      if (flyRig && flyRig.update) {
-        flyRig.group.position.set(autopilot.flyPos.x, autopilot.flyPos.y,
-          autopilot.flyPos.z);
-        flyRig.group.rotation.y = autopilot.flyHeading;
-        flyRig.update(tSeconds, autopilot.walk, autopilot.mood);
-      }
-
-      const camOffset = CHAPTER_CAMERA_OFFSET[autopilot.currentChapter] ||
-        CHAPTER_CAMERA_OFFSET.street;
-      const desiredCamPos = autopilot.flyPos.clone().add(camOffset);
-      worldCamera.position.lerp(desiredCamPos, Math.min(1, dt * 2.2));
-      worldCamera.lookAt(autopilot.flyPos.clone().add(new THREE.Vector3(0, 0.08, 0)));
-
-      animateProps(skateboard, car, dt, autopilot.currentChapter);
-      drawPhoneScreen(phoneProp, autopilot.currentChapter, autopilot.currentNpcKey,
-        tSeconds, autopilot.swipeStart);
-
-      if (worldRenderer) worldRenderer.render(worldScene, worldCamera);
-
-      if (scopeCtx && dom.scopeCanvas) {
-        drawOscilloscope(scopeCtx, dom.scopeCanvas.clientWidth,
-          dom.scopeCanvas.clientHeight, tSeconds);
-      }
-      if (rasterCtx && dom.rasterCanvas) {
-        drawRaster(rasterCtx, dom.rasterCanvas.clientWidth, dom.rasterCanvas.clientHeight,
-          tSeconds);
-      }
-      if (audioState.analyser && audioState.freqData) {
-        drawEqualizer(audioState.analyser, audioState.freqData);
-      }
-
-      requestAnimationFrame(animate);
-    }
-
-    requestAnimationFrame(animate);
   }
 
-  function reportFatal(err) {
-    const msg = `Fatal error: ${err && err.message ? err.message : err}`;
-    fatalErrorActive = true;
-    hideLoadingScreen();
-    setStatus(msg, 'error');
-    showErrorBanner(msg, true);
-    logEvent(msg);
-  }
+  function stepGame(dtSeconds) {
+    updateTypingRate(dtSeconds);
 
-  try {
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', () => {
-        try { main(); } catch (err) { reportFatal(err); }
-      });
+    if (game.phase === 'typing') {
+      stepTyping(dtSeconds);
+      if (game.fatigue >= 1) {
+        enterCollapse();
+      }
+    } else if (game.phase === 'collapsed') {
+      game.collapseTimer += dtSeconds * 1000;
+      if (game.collapseTimer >= BEETLE_ENTRY_DELAY_MS) {
+        startBeetleEntry();
+      }
     } else {
-      main();
+      stepBeetlePhase(dtSeconds);
     }
-  } catch (err) {
-    reportFatal(err);
+
+    if (dom.fatigueFill) dom.fatigueFill.style.width = `${Math.min(100, game.fatigue * 100).toFixed(0)}%`;
+    if (dom.fatigueValue) dom.fatigueValue.textContent = `${Math.min(100, Math.round(game.fatigue * 100))}%`;
+    if (dom.angerFill) dom.angerFill.style.width = `${game.anger.toFixed(0)}%`;
+    if (dom.angerValue) {
+      dom.angerValue.textContent = neuroSim ? `${Math.round(game.anger)}%` : 'нет данных';
+    }
+
+    // Like counters tick up gently on already-posted comments for life.
+    game.likeTickTimer -= dtSeconds;
+    if (game.likeTickTimer <= 0 && game.feed.length) {
+      game.likeTickTimer = 0.6 + Math.random() * 1.2;
+      const idx = Math.floor(Math.random() * game.feed.length);
+      game.feed[idx].likes += 1;
+    }
+
+    drawCommentFeedTexture(
+      game.feed,
+      game.currentComment.slice(0, game.typedChars),
+      Math.floor(world.clock.getElapsedTime() * 2) % 2 === 0,
+    );
+
+    const flyPose = game.phase === 'typing' ? 'typing'
+      : (game.phase === 'collapsed' || game.phase === 'beetle_entering' || game.phase === 'poking') ? 'collapsed'
+      : 'typing';
+    const typingRate = game.phase === 'typing'
+      ? BASE_TYPING_CHARS_PER_SEC * game.motorFactor * (1 - game.fatigue * 0.5)
+      : 0;
+
+    if (fly.rig && typeof fly.rig.update === 'function') {
+      fly.rig.update(world.clock.getElapsedTime(), 0, 'agitated', {
+        pose: flyPose,
+        typingRate: Math.max(0, Math.min(12, typingRate)),
+        fatigue: Math.min(1, game.fatigue),
+        dt: dtSeconds,
+      });
+    }
   }
+
+  // =========================================================================
+  // MAIN LOOP
+  // =========================================================================
+  let lastFrameTime = performance.now();
+
+  function frame(now) {
+    requestAnimationFrame(frame);
+    if (document.hidden) {
+      lastFrameTime = now;
+      return;
+    }
+    let dt = (now - lastFrameTime) / 1000;
+    dt = Math.max(0, Math.min(0.1, dt)); // clamp to avoid huge jumps after a pause
+    lastFrameTime = now;
+    const t = world.clock.getElapsedTime();
+
+    if (neuroSim) {
+      try {
+        neuroSim.step(dt);
+      } catch (err) {
+        logEvent(`Симуляция коннектома остановилась: ${err && err.message ? err.message : err}`);
+        neuroSim = null;
+      }
+      neuroSim.setDrive(Math.max(0, Math.min(2, 1 - 0.6 * Math.min(1, game.fatigue))));
+    }
+
+    stepGame(dt);
+
+    let summary = null;
+    if (neuroSim) {
+      try {
+        summary = neuroSim.getSummary();
+      } catch (err) {
+        summary = null;
+      }
+    }
+
+    if (summary) {
+      updateBrainColors(summary.displaySpikes, dt);
+      if (dom.spikesRate) dom.spikesRate.textContent = formatSpikesPerSecond(summary.spikesPerSecond);
+      if (dom.telemetryRate) {
+        const pamHz = (summary.groupRates && summary.groupRates.pam) || 0;
+        dom.telemetryRate.textContent = `${pamHz.toFixed(1)} Гц (модель)`;
+      }
+      const scopeCtx = dom.scopeCanvas && dom.scopeCanvas.getContext('2d');
+      if (scopeCtx) {
+        drawOscilloscope(scopeCtx, dom.scopeCanvas.clientWidth || 320, dom.scopeCanvas.clientHeight || 110,
+          (summary.groupRates && summary.groupRates.pam) || 0, true);
+      }
+      const rasterCtx = dom.rasterCanvas && dom.rasterCanvas.getContext('2d');
+      if (rasterCtx) {
+        drawRaster(rasterCtx, dom.rasterCanvas.clientWidth || 320, dom.rasterCanvas.clientHeight || 110,
+          summary.raster, true);
+      }
+    } else {
+      if (dom.spikesRate) dom.spikesRate.textContent = 'нет данных';
+      if (dom.telemetryRate) dom.telemetryRate.textContent = 'нет данных';
+      const scopeCtx = dom.scopeCanvas && dom.scopeCanvas.getContext('2d');
+      if (scopeCtx) {
+        drawOscilloscope(scopeCtx, dom.scopeCanvas.clientWidth || 320, dom.scopeCanvas.clientHeight || 110, 0, false);
+      }
+      const rasterCtx = dom.rasterCanvas && dom.rasterCanvas.getContext('2d');
+      if (rasterCtx) {
+        drawRaster(rasterCtx, dom.rasterCanvas.clientWidth || 320, dom.rasterCanvas.clientHeight || 110, null, false);
+      }
+    }
+
+    if (audio.enabled && audio.analyser) {
+      drawEqualizer(audio.analyser, audio.freqData);
+    } else {
+      decayEqualizerIdle();
+    }
+
+    renderBrainScene(t);
+
+    if (world.renderer && world.scene && world.camera) {
+      fitRendererToCanvas(world.renderer, world.camera, dom.worldCanvas);
+      world.renderer.render(world.scene, world.camera);
+    }
+  }
+
+  // =========================================================================
+  // INIT
+  // =========================================================================
+  async function init() {
+    setup2dCanvasSizing();
+    buildEqualizerBars();
+    setupSoundToggle();
+    createBrainScene();
+    createWorldScene();
+    buildBeetle();
+
+    setStatus('Загрузка сцены…', 'loading');
+
+    const flyReady = await initFlyRig();
+
+    let neuronPayload = null;
+    try {
+      neuronPayload = await fetchNeurons();
+      buildBrainPointCloud(neuronPayload);
+      logEvent(`Загружено ${neuronPayload.points.length} точек из /api/neurons.`);
+    } catch (err) {
+      const msg = err && err.message ? err.message : String(err);
+      setStatus(`Ошибка загрузки нейронов: ${msg}`, 'error');
+      logEvent(`Ошибка /api/neurons: ${msg}`);
+      showErrorBanner(`Не удалось загрузить данные нейронов: ${msg}`, true);
+      if (dom.sourceLabel) dom.sourceLabel.textContent = 'источник данных недоступен';
+    }
+
+    hideLoadingScreen();
+    if (flyReady) {
+      setStatus('Муха пишет комментарии.', 'ready');
+    }
+
+    // Connectome sim loads in the background; the brain panel shows its own
+    // progress bar and never blocks the rest of the scene.
+    if (neuronPayload) {
+      const displayIndices = neuronPayload.points.map((p, i) => (typeof p.index === 'number' ? p.index : i));
+      neuroSim = await loadNeuroSim(displayIndices);
+    } else {
+      neuroSimFailed = true;
+      if (dom.backendLabel) dom.backendLabel.textContent = 'Бэкенд: недоступен';
+      if (dom.brainProgressText) dom.brainProgressText.textContent = 'симуляция недоступна (нет точек для сопоставления)';
+    }
+
+    startNewComment();
+    requestAnimationFrame(frame);
+  }
+
+  init().catch((err) => {
+    const msg = err && err.message ? err.message : String(err);
+    setStatus(`Критическая ошибка: ${msg}`, 'error');
+    showErrorBanner(`Критическая ошибка инициализации: ${msg}`, true);
+    hideLoadingScreen();
+  });
 })();
