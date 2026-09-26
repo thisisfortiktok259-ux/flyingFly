@@ -1,0 +1,576 @@
+#!/usr/bin/env python3
+"""Flying Fly backend server.
+
+Pure Python 3 standard library HTTP server (no third-party dependencies).
+Runs on port 8085 by default and exposes:
+
+  GET  /api/health
+      Liveness check.
+
+  POST /api/chat
+      Body: {"npc": "<one of the known character names>", "message": "<text>"}
+      Sends a persona-flavored prompt to Google Gemini (generateContent) and
+      returns {"npc": ..., "reply": ...}. All chat output is model-generated
+      text; it is not scripted dialogue and is not validated game content.
+
+  GET  /assets/body/model.json
+  GET  /assets/body/meshes/<filename>.stl
+      Proxies and locally caches the fruit-fly body model assets published by
+      the Hugging Face Space "Xenova/fruit-fly-simulation"
+      (public/body/assets/model.json and public/body/assets/meshes/*.stl).
+      Files are fetched once and served from a local cache directory after
+      that. Mesh filenames are strictly validated to prevent directory
+      traversal or arbitrary upstream paths.
+
+  GET  /api/neurons
+      Returns a deterministic ~16,000-point sample of REAL soma coordinates
+      from the same Hugging Face Space's public/data/manifest.json and
+      public/data/neurons.json.gz (MaleCNS v1.0 dataset, 166,700 neurons,
+      brain + nerve cord). No synthetic or fabricated points are ever
+      returned; if the source data cannot be fetched or parsed, the endpoint
+      returns an explicit JSON error instead of a fallback.
+
+Configuration (read from a local .env file or the real process environment,
+process environment wins if both are set):
+
+  GEMINI_API_KEY   Required for /api/chat. Never logged or echoed back.
+  GEMINI_MODEL     Defaults to "gemini-3.5-flash-lite".
+  PORT             Defaults to 8085.
+
+The .env file itself, and any dotfile, is never served over HTTP by this
+server: only the fixed set of routes above exists, there is no generic
+static-file or directory-listing handler.
+"""
+from __future__ import annotations
+
+import gzip
+import json
+import os
+import re
+import socket
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+BASE_DIR = Path(__file__).resolve().parent
+CACHE_DIR = BASE_DIR / ".cache"
+ENV_PATH = BASE_DIR / ".env"
+
+
+def _load_dotenv(path: Path) -> dict:
+    """Minimal .env parser: KEY=VALUE lines, '#' comments, no interpolation."""
+    values: dict = {}
+    if not path.exists():
+        return values
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return values
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        val = val.strip().strip('"').strip("'")
+        if key:
+            values[key] = val
+    return values
+
+
+_DOTENV = _load_dotenv(ENV_PATH)
+
+
+def get_env(name: str, default: str = "") -> str:
+    """Real process environment takes precedence over the local .env file."""
+    if name in os.environ and os.environ[name] != "":
+        return os.environ[name]
+    return _DOTENV.get(name, default)
+
+
+GEMINI_API_KEY = get_env("GEMINI_API_KEY", "")
+GEMINI_MODEL = get_env("GEMINI_MODEL", "gemini-3.5-flash-lite")
+try:
+    PORT = int(get_env("PORT", "8085") or "8085")
+except ValueError:
+    PORT = 8085
+
+HF_SPACE_ROOT = "https://huggingface.co/spaces/Xenova/fruit-fly-simulation/resolve/main"
+HF_BODY_ASSETS = f"{HF_SPACE_ROOT}/public/body/assets"
+HF_DATA = f"{HF_SPACE_ROOT}/public/data"
+HF_ATTRIBUTION_SOURCE = (
+    "Xenova/fruit-fly-simulation Hugging Face Space "
+    "(public/data/manifest.json, public/data/neurons.json.gz); "
+    "MaleCNS v1.0 connectome, FlyEM/HHMI Janelia, University of Cambridge, "
+    "MRC LMB, Google Research; CC BY 4.0"
+)
+
+HTTP_TIMEOUT = 20  # seconds, applies to every outbound fetch (HF + Gemini)
+NEURON_SAMPLE_SIZE = 16000
+MAX_CHAT_BODY_BYTES = 4096
+MAX_MESSAGE_LEN = 500
+
+MESH_NAME_RE = re.compile(r"^[A-Za-z0-9_\-]{1,80}\.stl$")
+
+DEFAULT_NEURON_METADATA_COLUMNS = [
+    "bodyId",
+    "type",
+    "superclass",
+    "side",
+    "consensusNT",
+    "fastSign",
+    "somaLocation8nm",
+]
+
+# ---------------------------------------------------------------------------
+# NPC personas (lightweight; no additional game lore is documented in this
+# project, so each persona is a short, self-consistent character sketch tied
+# only to its given name). Instructions are in Russian since replies must be
+# in Russian.
+# ---------------------------------------------------------------------------
+
+_PERSONA_SUFFIX = (
+    " Не выходи из роли, не упоминай, что ты искусственный интеллект или "
+    "языковая модель. Отвечай только по-русски, живо и коротко "
+    "(1-2 предложения)."
+)
+
+NPC_PERSONAS = {
+    "Зина": (
+        "Ты — Зина, приветливая пожилая жительница деревни. Ты любишь "
+        "готовить, ухаживать за огородом и делиться деревенскими новостями. "
+        "Говоришь тепло и по-простому, обращаешься к собеседнику "
+        "по-доброму." + _PERSONA_SUFFIX
+    ),
+    "Артем": (
+        "Ты — Артем, молодой энергичный механик, который вечно что-то "
+        "ремонтирует и мастерит. Говоришь быстро, с энтузиазмом, иногда "
+        "упоминаешь инструменты и детали." + _PERSONA_SUFFIX
+    ),
+    "Григорий": (
+        "Ты — Григорий, пожилой и немного суровый деревенский старейшина. "
+        "Говоришь мало, но по делу, с житейской мудростью." + _PERSONA_SUFFIX
+    ),
+    "Петрович": (
+        "Ты — Петрович, практичный деревенский мастер на все руки. "
+        "Говоришь прямо, без лишних слов, иногда называешь собеседника "
+        "«дружище»." + _PERSONA_SUFFIX
+    ),
+    "Барсик": (
+        "Ты — Барсик, деревенский кот. Ты игривый, хитрый и немного "
+        "капризный, воспринимаешь всё по-кошачьи, снисходишь до разговора "
+        "с человеком нехотя." + _PERSONA_SUFFIX
+    ),
+    "Даня": (
+        "Ты — Даня, любопытный деревенский мальчишка. Тебе всё интересно, "
+        "ты задаёшь вопросы и легко увлекаешься, говоришь живо и "
+        "по-детски." + _PERSONA_SUFFIX
+    ),
+}
+
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
+
+_cache_locks_guard = threading.Lock()
+_cache_locks: dict = {}
+
+
+def _lock_for(key: str) -> threading.Lock:
+    with _cache_locks_guard:
+        lock = _cache_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _cache_locks[key] = lock
+        return lock
+
+
+def _http_get(url: str) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": "flyingFly-server/1.0"})
+    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+        return resp.read()
+
+
+def _atomic_write(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + f".tmp-{os.getpid()}-{threading.get_ident()}")
+    with open(tmp, "wb") as f:
+        f.write(data)
+    os.replace(tmp, path)
+
+
+def _fetch_cached(url: str, cache_path: Path) -> bytes:
+    """Return cached bytes for url, downloading and caching on first use.
+
+    Raises urllib.error.URLError / OSError on failure; callers must turn
+    this into an explicit JSON error response, never a synthetic fallback.
+    """
+    if cache_path.exists():
+        return cache_path.read_bytes()
+    lock = _lock_for(str(cache_path))
+    with lock:
+        if cache_path.exists():
+            return cache_path.read_bytes()
+        data = _http_get(url)
+        _atomic_write(cache_path, data)
+        return data
+
+
+# ---------------------------------------------------------------------------
+# Neuron soma sample (MaleCNS v1.0, brain + nerve cord, 166,700 neurons)
+# ---------------------------------------------------------------------------
+
+_neuron_sample_guard = threading.Lock()
+_neuron_sample_cache = None  # populated lazily, kept in memory once built
+
+
+def _extract_xyz(value):
+    """Best-effort extraction of (x, y, z) floats from a soma-location field.
+
+    Returns None if the value cannot be interpreted as three coordinates.
+    Never invents coordinates; unparsable rows are simply excluded.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)) and len(value) >= 3:
+        try:
+            return float(value[0]), float(value[1]), float(value[2])
+        except (TypeError, ValueError):
+            return None
+    if isinstance(value, dict):
+        for keys in (("x", "y", "z"), ("X", "Y", "Z")):
+            if all(k in value for k in keys):
+                try:
+                    return (
+                        float(value[keys[0]]),
+                        float(value[keys[1]]),
+                        float(value[keys[2]]),
+                    )
+                except (TypeError, ValueError):
+                    return None
+        return None
+    if isinstance(value, str):
+        parts = re.split(r"[,\s]+", value.strip("[]() "))
+        parts = [p for p in parts if p]
+        if len(parts) >= 3:
+            try:
+                return float(parts[0]), float(parts[1]), float(parts[2])
+            except ValueError:
+                return None
+    return None
+
+
+def _row_to_fields(row, columns):
+    """Map one neuron row (list/tuple or dict) to a column-name dict."""
+    if isinstance(row, dict):
+        return row
+    if isinstance(row, (list, tuple)):
+        return {columns[i]: row[i] for i in range(min(len(columns), len(row)))}
+    return {}
+
+
+def _build_neuron_sample():
+    """Download (or reuse cache of) manifest + neuron metadata, then build a
+    deterministic ~16k-point normalized sample of real soma coordinates.
+    Raises on any failure; there is no synthetic-data fallback.
+    """
+    manifest_bytes = _fetch_cached(f"{HF_DATA}/manifest.json", CACHE_DIR / "data" / "manifest.json")
+    manifest = json.loads(manifest_bytes.decode("utf-8"))
+
+    metadata_file = manifest.get("metadata", "neurons.json.gz")
+    columns = manifest.get("metadataColumns") or DEFAULT_NEURON_METADATA_COLUMNS
+    dataset_name = manifest.get("dataset", "MaleCNS v1.0")
+    total_neurons = manifest.get("neurons")
+
+    gz_bytes = _fetch_cached(f"{HF_DATA}/{metadata_file}", CACHE_DIR / "data" / metadata_file)
+    raw = gzip.decompress(gz_bytes)
+    rows = json.loads(raw.decode("utf-8"))
+    if not isinstance(rows, list):
+        raise ValueError("neuron metadata is not a JSON array")
+
+    total_rows = len(rows)
+    if total_neurons is None:
+        total_neurons = total_rows
+
+    target = min(NEURON_SAMPLE_SIZE, total_rows)
+    stride = max(1, total_rows // target) if target else 1
+
+    soma_key = "somaLocation8nm" if "somaLocation8nm" in columns else columns[-1]
+
+    candidates = []
+    idx = 0
+    while idx < total_rows and len(candidates) < target:
+        fields = _row_to_fields(rows[idx], columns)
+        xyz = _extract_xyz(fields.get(soma_key))
+        if xyz is not None:
+            candidates.append((xyz, fields))
+        idx += stride
+
+    if not candidates:
+        raise ValueError("no usable soma coordinates found in source data")
+
+    xs = [c[0][0] for c in candidates]
+    ys = [c[0][1] for c in candidates]
+    zs = [c[0][2] for c in candidates]
+    cx = (min(xs) + max(xs)) / 2.0
+    cy = (min(ys) + max(ys)) / 2.0
+    cz = (min(zs) + max(zs)) / 2.0
+    half_range = max(
+        (max(xs) - min(xs)) / 2.0,
+        (max(ys) - min(ys)) / 2.0,
+        (max(zs) - min(zs)) / 2.0,
+        1e-9,
+    )
+
+    points = []
+    for (x, y, z), fields in candidates:
+        point = {
+            "x": (x - cx) / half_range,
+            "y": (y - cy) / half_range,
+            "z": (z - cz) / half_range,
+        }
+        if fields.get("type") is not None:
+            point["type"] = fields.get("type")
+        if fields.get("side") is not None:
+            point["side"] = fields.get("side")
+        if fields.get("consensusNT") is not None:
+            point["nt"] = fields.get("consensusNT")
+        points.append(point)
+
+    return {
+        "dataset": dataset_name,
+        "total": total_neurons,
+        "source": HF_ATTRIBUTION_SOURCE,
+        "points": points,
+    }
+
+
+def get_neuron_sample():
+    global _neuron_sample_cache
+    if _neuron_sample_cache is not None:
+        return _neuron_sample_cache
+    with _neuron_sample_guard:
+        if _neuron_sample_cache is None:
+            _neuron_sample_cache = _build_neuron_sample()
+        return _neuron_sample_cache
+
+
+# ---------------------------------------------------------------------------
+# Gemini chat
+# ---------------------------------------------------------------------------
+
+
+class ChatError(Exception):
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+def call_gemini(persona_prompt: str, message: str) -> str:
+    if not GEMINI_API_KEY:
+        raise ChatError(500, "Server is not configured with a Gemini API key.")
+
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    )
+    payload = {
+        "system_instruction": {"parts": [{"text": persona_prompt}]},
+        "contents": [{"role": "user", "parts": [{"text": message}]}],
+        "generationConfig": {"temperature": 0.9, "maxOutputTokens": 220},
+    }
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")[:300]
+        raise ChatError(502, f"Gemini API returned an error ({exc.code}): {detail}")
+    except urllib.error.URLError as exc:
+        raise ChatError(502, f"Could not reach Gemini API: {exc.reason}")
+
+    try:
+        data = json.loads(raw.decode("utf-8"))
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError, ValueError, TypeError):
+        raise ChatError(502, "Gemini API returned an unexpected response shape.")
+
+    return text.strip()
+
+
+# ---------------------------------------------------------------------------
+# HTTP handler
+# ---------------------------------------------------------------------------
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "FlyingFlyServer/1.0"
+    protocol_version = "HTTP/1.1"
+    timeout = 30  # socket read timeout, seconds
+
+    def _send_json(self, status: int, payload: dict) -> None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def _send_error_json(self, status: int, message: str) -> None:
+        self._send_json(status, {"error": message})
+
+    def _send_bytes(self, status: int, content_type: str, data: bytes) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    def log_message(self, fmt, *args):  # quieter default logging
+        sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+
+    # -- routing -----------------------------------------------------------
+
+    def do_GET(self):
+        path = self.path.split("?", 1)[0]
+        try:
+            if path == "/api/health":
+                return self._handle_health()
+            if path == "/api/neurons":
+                return self._handle_neurons()
+            if path == "/assets/body/model.json":
+                return self._handle_body_model()
+            if path.startswith("/assets/body/meshes/"):
+                return self._handle_body_mesh(path[len("/assets/body/meshes/") :])
+            return self._send_error_json(404, "Not found.")
+        except Exception as exc:  # last-resort guard, never leak internals
+            self._send_error_json(500, f"Internal server error: {exc.__class__.__name__}")
+
+    def do_POST(self):
+        path = self.path.split("?", 1)[0]
+        try:
+            if path == "/api/chat":
+                return self._handle_chat()
+            return self._send_error_json(404, "Not found.")
+        except Exception as exc:
+            self._send_error_json(500, f"Internal server error: {exc.__class__.__name__}")
+
+    # -- handlers ------------------------------------------------------------
+
+    def _handle_health(self):
+        self._send_json(200, {"status": "ok", "time": time.time()})
+
+    def _handle_chat(self):
+        length_header = self.headers.get("Content-Length")
+        if length_header is None:
+            return self._send_error_json(400, "Missing Content-Length header.")
+        try:
+            length = int(length_header)
+        except ValueError:
+            return self._send_error_json(400, "Invalid Content-Length header.")
+        if length <= 0:
+            return self._send_error_json(400, "Empty request body.")
+        if length > MAX_CHAT_BODY_BYTES:
+            return self._send_error_json(413, "Request body too large.")
+
+        raw = self.rfile.read(length)
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return self._send_error_json(400, "Request body must be valid JSON.")
+        if not isinstance(payload, dict):
+            return self._send_error_json(400, "Request body must be a JSON object.")
+
+        npc = payload.get("npc")
+        message = payload.get("message")
+
+        if not isinstance(npc, str) or npc not in NPC_PERSONAS:
+            return self._send_error_json(
+                400,
+                "Field 'npc' must be one of: " + ", ".join(sorted(NPC_PERSONAS)),
+            )
+        if not isinstance(message, str):
+            return self._send_error_json(400, "Field 'message' must be a string.")
+        message = message.strip()
+        if not message:
+            return self._send_error_json(400, "Field 'message' must not be empty.")
+        if len(message) > MAX_MESSAGE_LEN:
+            return self._send_error_json(
+                400, f"Field 'message' must be at most {MAX_MESSAGE_LEN} characters."
+            )
+
+        try:
+            reply = call_gemini(NPC_PERSONAS[npc], message)
+        except ChatError as exc:
+            return self._send_error_json(exc.status, exc.message)
+
+        self._send_json(200, {"npc": npc, "reply": reply})
+
+    def _handle_body_model(self):
+        cache_path = CACHE_DIR / "body" / "model.json"
+        try:
+            data = _fetch_cached(f"{HF_BODY_ASSETS}/model.json", cache_path)
+        except (urllib.error.URLError, OSError) as exc:
+            return self._send_error_json(502, f"Could not fetch model.json: {exc}")
+        self._send_bytes(200, "application/json; charset=utf-8", data)
+
+    def _handle_body_mesh(self, filename: str):
+        if not MESH_NAME_RE.match(filename) or ".." in filename or "/" in filename:
+            return self._send_error_json(400, "Invalid mesh filename.")
+        cache_path = CACHE_DIR / "body" / "meshes" / filename
+        # Defense in depth: resolved path must stay inside the cache dir.
+        resolved = cache_path.resolve()
+        if not str(resolved).startswith(str((CACHE_DIR / "body" / "meshes").resolve())):
+            return self._send_error_json(400, "Invalid mesh path.")
+        try:
+            data = _fetch_cached(f"{HF_BODY_ASSETS}/meshes/{filename}", cache_path)
+        except (urllib.error.URLError, OSError) as exc:
+            return self._send_error_json(502, f"Could not fetch mesh '{filename}': {exc}")
+        self._send_bytes(200, "application/vnd.ms-pki.stl", data)
+
+    def _handle_neurons(self):
+        try:
+            sample = get_neuron_sample()
+        except (urllib.error.URLError, OSError) as exc:
+            return self._send_error_json(502, f"Could not fetch neuron data: {exc}")
+        except (ValueError, json.JSONDecodeError, gzip.BadGzipFile) as exc:
+            return self._send_error_json(502, f"Could not parse neuron data: {exc}")
+        self._send_json(200, sample)
+
+
+def main():
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    server.daemon_threads = True
+    print(f"Flying Fly backend listening on http://0.0.0.0:{PORT}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()
