@@ -1083,9 +1083,26 @@ import { loadFly } from './fly_rig.js';
       world.deskTopY + 0.035 - floorYLocal * fly.scale,
       world.laptopPos.z + 0.16,
     );
-    rig.group.rotation.y = Math.PI;
+    // Facing rotation must NOT be written onto rig.group: fly_rig.js sets
+    // that group's rotation.x = -PI/2 to convert its native +Z-up space
+    // into three.js +Y-up. Writing .y there yaws about a pre-conversion
+    // axis (Euler XYZ applies Ry inside Rx) and also corrupts
+    // applyImpulse()'s group-quaternion inverse. Wrap the rig instead and
+    // put position + facing on the wrapper.
+    const flyRoot = new THREE.Group();
+    flyRoot.name = 'fly-root';
+    flyRoot.position.copy(rig.group.position);
+    flyRoot.rotation.y = Math.PI;
+    rig.group.position.set(0, 0, 0);
+    flyRoot.add(rig.group);
+    fly.root = flyRoot;
 
-    world.scene.add(rig.group);
+    // fly_rig.js documents floorY as world-space and defaults it to 0, so
+    // its leg-tip floor contact never engaged for a fly standing on the
+    // desk. Hand it the desk surface height.
+    rig.floorY = world.deskTopY + 0.035;
+
+    world.scene.add(flyRoot);
 
     if (typeof rig.setRagdoll !== 'function' && !fly.warnedMissingRagdoll) {
       fly.warnedMissingRagdoll = true;
@@ -1108,7 +1125,14 @@ import { loadFly } from './fly_rig.js';
 
   function safeApplyImpulse(direction, strength) {
     if (fly.rig && typeof fly.rig.applyImpulse === 'function') {
-      fly.rig.applyImpulse(direction, strength);
+      // fly_rig.js only undoes its OWN group rotation, so bring the world
+      // direction into the wrapper's frame before handing it over.
+      let impulseDir = direction;
+      if (fly.root && direction && typeof direction.clone === 'function') {
+        impulseDir = direction.clone().applyQuaternion(
+          fly.root.getWorldQuaternion(new THREE.Quaternion()).invert());
+      }
+      fly.rig.applyImpulse(impulseDir, strength);
     } else {
       logEvent('Симуляция толчка недоступна: applyImpulse() отсутствует в fly_rig.js.');
     }
@@ -1365,7 +1389,7 @@ import { loadFly } from './fly_rig.js';
         logEvent(`Симуляция коннектома остановилась: ${err && err.message ? err.message : err}`);
         neuroSim = null;
       }
-      neuroSim.setDrive(Math.max(0, Math.min(2, 1 - 0.6 * Math.min(1, game.fatigue))));
+      if (neuroSim) neuroSim.setDrive(Math.max(0, Math.min(2, 1 - 0.6 * Math.min(1, game.fatigue))));
     }
 
     stepGame(dt);
