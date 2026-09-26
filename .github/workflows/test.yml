@@ -1,0 +1,50 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python-backend-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # server.py is pure standard library; no requirements.txt / install step
+      # is needed. Tests mock all outbound network calls (Gemini, Hugging
+      # Face), so this job does not require internet access to pass.
+      - name: Run backend unit tests (python3 -m unittest)
+        run: python3 -m unittest test_server.py -v
+
+  frontend-syntax-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # This only parses game.js and fly_rig.js to catch syntax errors; it
+      # never executes them and never modifies the originals in the repo.
+      # They use ES module `import`/`export` syntax but have no
+      # "type": "module" package.json, so `node --check` on the .js files
+      # directly would misparse them as CommonJS. Working copies are made
+      # under a scratch directory with a .mjs extension purely so Node
+      # parses them as ES modules for the syntax check.
+      - name: Syntax-check frontend ES modules (node --check, no execution)
+        run: |
+          set -e
+          mkdir -p /tmp/js-check
+          for f in game.js fly_rig.js; do
+            cp "$f" "/tmp/js-check/$(basename "$f" .js).mjs"
+            node --check "/tmp/js-check/$(basename "$f" .js).mjs"
+          done
