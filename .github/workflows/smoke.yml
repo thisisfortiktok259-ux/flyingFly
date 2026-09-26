@@ -10,25 +10,46 @@ permissions:
   contents: read
 
 jobs:
-  headless:
+  nosim:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      # Output is silenced so the 20k job-log budget is left for diagnostics.
       - name: Install Playwright (quiet)
         run: |
           pip install -q playwright==1.47.0 > /dev/null 2>&1
           python -m playwright install --with-deps chromium > /dev/null 2>&1
           echo installed
-      - name: Headless smoke
-        run: python3 ci_tmp/smoke2.py 35
+      - name: Headless smoke without the connectome sim
+        run: python3 ci_tmp/smoke2.py 25 '?nosim=1'
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: screenshots
+          name: screenshots-nosim
+          path: artifacts/
+          if-no-files-found: warn
+
+  fullsim:
+    runs-on: ubuntu-latest
+    timeout-minutes: 14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Playwright (quiet)
+        run: |
+          pip install -q playwright==1.47.0 > /dev/null 2>&1
+          python -m playwright install --with-deps chromium > /dev/null 2>&1
+          echo installed
+      - name: Headless smoke with the connectome sim on
+        run: python3 ci_tmp/smoke2.py 60
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screenshots-fullsim
           path: artifacts/
           if-no-files-found: warn
