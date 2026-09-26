@@ -1,0 +1,17 @@
+name: Dump
+
+on:
+  push:
+    paths:
+      - '.github/workflows/dump.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lines:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 ci_tmp/dump2.py
