@@ -1,0 +1,50 @@
+name: Investigate
+
+on:
+  push:
+    paths:
+      - 'ci_tmp/**'
+      - '.github/workflows/investigate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  assets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 ci_tmp/ci_tools.py assets
+
+  space-js:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 ci_tmp/ci_tools.py space-js
+
+  dump:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        topic: [head, world, fly, frame, game, err, comment]
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 ci_tmp/ci_tools.py dump ${{ matrix.topic }}
+
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install playwright==1.47.0
+      - run: python -m playwright install --with-deps chromium
+      - run: python3 ci_tmp/ci_tools.py smoke 40
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screenshots
+          path: artifacts/
