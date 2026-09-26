@@ -4,6 +4,19 @@
 Pure Python 3 standard library HTTP server (no third-party dependencies).
 Runs on port 8085 by default and exposes:
 
+  GET  /
+  GET  /index.html
+  GET  /style.css
+  GET  /game.js
+  GET  /fly_rig.js
+      Serves the app shell and its frontend assets from a small, fixed
+      allowlist (each URL maps to exactly one file in the project root,
+      with the correct MIME type). This is not a generic static-file or
+      directory-listing handler: any path not on this list, and not one of
+      the API/asset routes below, is a 404. In particular, dotfiles such as
+      as .env are never served, and the server's own source files (e.g.
+      server.py, test_server.py) are never served.
+
   GET  /api/health
       Liveness check.
 
@@ -28,7 +41,11 @@ Runs on port 8085 by default and exposes:
       public/data/neurons.json.gz (MaleCNS v1.0 dataset, 166,700 neurons,
       brain + nerve cord). No synthetic or fabricated points are ever
       returned; if the source data cannot be fetched or parsed, the endpoint
-      returns an explicit JSON error instead of a fallback.
+      returns an explicit JSON error instead of a fallback. Note: the exact
+      per-row shape of neurons.json.gz (list-of-lists vs list-of-objects) is
+      not fully confirmed from the published manifest alone; this code
+      handles both shapes defensively and only emits points it can actually
+      parse from the real source data, never fabricated ones.
 
 Configuration (read from a local .env file or the real process environment,
 process environment wins if both are set):
@@ -38,8 +55,9 @@ process environment wins if both are set):
   PORT             Defaults to 8085.
 
 The .env file itself, and any dotfile, is never served over HTTP by this
-server: only the fixed set of routes above exists, there is no generic
-static-file or directory-listing handler.
+server: only the fixed set of routes above exists (a small static allowlist
+plus the API/asset routes), there is no generic static-file or
+directory-listing handler.
 """
 from __future__ import annotations
 
@@ -129,6 +147,26 @@ DEFAULT_NEURON_METADATA_COLUMNS = [
     "fastSign",
     "somaLocation8nm",
 ]
+
+# ---------------------------------------------------------------------------
+# Static frontend allowlist.
+#
+# This is intentionally NOT a generic static-file server. Each entry maps one
+# exact request path to one fixed file (by basename, in BASE_DIR) and its
+# correct MIME type. Requests for anything else -- including .env, .env.*,
+# server.py, test_server.py, or any path with ".." -- never match this table
+# and fall through to a plain 404 from the router. Frontend file *contents*
+# (index.html, style.css, game.js, fly_rig.js) are out of scope for this
+# server change and are not modified here.
+# ---------------------------------------------------------------------------
+
+STATIC_FILES = {
+    "/": ("index.html", "text/html; charset=utf-8"),
+    "/index.html": ("index.html", "text/html; charset=utf-8"),
+    "/style.css": ("style.css", "text/css; charset=utf-8"),
+    "/game.js": ("game.js", "application/javascript; charset=utf-8"),
+    "/fly_rig.js": ("fly_rig.js", "application/javascript; charset=utf-8"),
+}
 
 # ---------------------------------------------------------------------------
 # NPC personas (lightweight; no additional game lore is documented in this
@@ -281,6 +319,14 @@ def _build_neuron_sample():
     """Download (or reuse cache of) manifest + neuron metadata, then build a
     deterministic ~16k-point normalized sample of real soma coordinates.
     Raises on any failure; there is no synthetic-data fallback.
+
+    Note: the published manifest documents metadataColumns (an ordered list
+    of field names) but does not itself state whether each row in
+    neurons.json.gz is a JSON array in that order or a JSON object keyed by
+    those names -- the two descriptions of this found while researching the
+    source were contradictory. This function handles both shapes (see
+    _row_to_fields) and only emits a point when real x/y/z coordinates were
+    actually parsed from the source; it never fabricates a point.
     """
     manifest_bytes = _fetch_cached(f"{HF_DATA}/manifest.json", CACHE_DIR / "data" / "manifest.json")
     manifest = json.loads(manifest_bytes.decode("utf-8"))
@@ -455,6 +501,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?", 1)[0]
         try:
+            if path in STATIC_FILES:
+                return self._handle_static(*STATIC_FILES[path])
             if path == "/api/health":
                 return self._handle_health()
             if path == "/api/neurons":
@@ -477,6 +525,21 @@ class Handler(BaseHTTPRequestHandler):
             self._send_error_json(500, f"Internal server error: {exc.__class__.__name__}")
 
     # -- handlers ------------------------------------------------------------
+
+    def _handle_static(self, filename: str, content_type: str):
+        """Serve one fixed, allowlisted frontend file from BASE_DIR.
+
+        `filename` always comes from the hardcoded STATIC_FILES table above,
+        never from request input, so there is no path-traversal surface
+        here. If the file is missing from the repository this returns a 404
+        JSON error rather than guessing at content.
+        """
+        file_path = BASE_DIR / filename
+        try:
+            data = file_path.read_bytes()
+        except OSError:
+            return self._send_error_json(404, f"{filename} not found.")
+        self._send_bytes(200, content_type, data)
 
     def _handle_health(self):
         self._send_json(200, {"status": "ok", "time": time.time()})
