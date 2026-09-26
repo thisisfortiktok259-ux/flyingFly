@@ -59,9 +59,9 @@ ordered `metadataColumns` array for `neurons.json.gz`, but does not itself
 state whether each row in that file is a JSON array (values in that column
 order) or a JSON object (keyed by those column names); independent
 descriptions of this file found during research were contradictory on that
-point. `server.py` handles both shapes defensively and only emits a point
-for a neuron when real x/y/z soma coordinates were actually parsed from the
-source; it never fabricates a point.
+point. `server.py` handles both shapes defensively (see `_row_to_fields`) and
+only emits a point for a neuron when real x/y/z soma coordinates were
+actually parsed from the source; it never fabricates a point.
 
 ## Requirements
 
@@ -145,7 +145,9 @@ Request body:
 - `npc` must be one of: `Зина`, `Артем`, `Григорий`, `Петрович`, `Барсик`,
   `Даня`. Any other value is rejected with a 400 JSON error.
 - `message` must be a non-empty string up to 500 characters after trimming.
-  The request body itself is capped at 4 KB.
+- The raw request body itself is capped at 4 KB (`MAX_CHAT_BODY_BYTES`); a
+  larger `Content-Length` is rejected with **413** before the body is even
+  read or parsed.
 
 Response:
 
@@ -154,9 +156,13 @@ Response:
 ```
 
 Errors are always JSON: `{"error": "..."}` with an appropriate HTTP status
-(400 for bad input, 500 if the server has no Gemini API key configured, 502
-if Gemini could not be reached or returned something unexpected). The API key
-is never included in any response or log line.
+(400 for bad input, 413 for an oversized body, 500 if the server has no
+Gemini API key configured, 502 if Gemini could not be reached, returned a
+blocked/empty response, or returned something in an unexpected shape). The
+Gemini API key is sent to Google as a URL query parameter, exactly as Google
+documents; the backend never includes that URL, or the key itself, in any
+response, error message, or log line, on any failure path (network error,
+HTTP error, malformed JSON, blocked content, or unexpected response shape).
 
 Each of the six personas is a short, self-contained character sketch (there
 is no additional documented backstory for these characters in this project);
@@ -216,10 +222,54 @@ order, so the same request always returns the same sample):
 - The server uses a threaded HTTP server with a socket timeout and a fixed
   timeout on every outbound request (to Hugging Face and to Gemini), so a
   slow or unresponsive upstream cannot hang the server indefinitely.
+- **No downloaded data is trusted just because the request succeeded.**
+  `manifest.json`, the compressed `neurons.json.gz`, and its decompressed
+  contents are each size-capped (see the `MAX_*` constants in `server.py`)
+  before being parsed, so a truncated, corrupted, or maliciously large
+  upstream response cannot exhaust server memory (decompression-bomb
+  protection lives in `_safe_gunzip`).
+- The Gemini request body uses the API's documented camelCase field name
+  `systemInstruction` (not `system_instruction`), and the response is
+  defensively unpacked: a missing/empty `candidates` list, a
+  safety-blocked response, or an unexpected shape all produce a clear 502
+  JSON error instead of a crash or a silently wrong reply.
+
+## Tests and CI
+
+`test_server.py` covers, without requiring live internet access:
+
+- The static frontend routes (`/`, `/index.html`, `/style.css`, `/game.js`,
+  `/fly_rig.js`) and that `.env`, `server.py`, `test_server.py`, etc. are
+  never served.
+- `/api/chat` input validation, including the 400 cases and the 413
+  oversized-body regression case.
+- `call_gemini()` with `urllib.request.urlopen` mocked: the outgoing payload
+  shape (`systemInstruction`, not `system_instruction`), that HTTP/URL
+  errors and blocked/malformed responses never leak the API key or its URL
+  into the resulting error message, and that a well-formed mocked response
+  is parsed correctly.
+- `_build_neuron_sample()` with the Hugging Face fetch mocked: both a
+  list-of-lists and a list-of-dicts row shape for `neurons.json.gz`, that
+  rows without usable coordinates are skipped (never fabricated), and that
+  malformed source data raises an explicit error.
+- `_safe_gunzip()`: normal round-trip decompression, and that decompression
+  is refused once it would exceed an explicit output cap.
+
+Run locally with `python3 -m unittest test_server.py -v`.
+
+A GitHub Actions workflow (`.github/workflows/test.yml`) runs this same test
+suite on push/PR to `main`, plus a syntax-only check of `game.js` and
+`fly_rig.js` with `node --check` (the files are copied to a scratch `.mjs`
+path for the check only, since they use ES module syntax without a
+`package.json`; nothing in the repository is executed or modified by this
+check). This workflow has been added but not run in this environment, so its
+results have not been verified end-to-end here; whether Actions are enabled
+for this repository depends on the repository's own settings.
 
 ## Scope of this change
 
-This backend change touches only `server.py`, `test_server.py`, `.gitignore`,
-and this README. The frontend files (`index.html`, `style.css`, `game.js`,
-`fly_rig.js`) are served by the new allowlisted routes above but their
-contents were not modified.
+This backend change touches only `server.py`, `test_server.py`,
+`.github/workflows/test.yml`, `.gitignore`, and this README. The frontend
+files (`index.html`, `style.css`, `game.js`, `fly_rig.js`) are served by the
+allowlisted routes above, and syntax-checked (never executed) by CI, but
+their contents were not modified.
