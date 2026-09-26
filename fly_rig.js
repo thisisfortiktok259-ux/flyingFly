@@ -16,11 +16,12 @@
  *   meshScale:   scalar (1000) dividing raw STL vertex units down to rig units
  *   axisOrder:   e.g. ["pitch","roll","yaw"] - the order joint-angle axes compose in
  *   axisVector:  { pitch:[x,y,z], roll:[x,y,z], yaw:[x,y,z] } - local rotation axes
- *   dofs:        array of { name, parent, child, axis, defaultDeg, rangeDeg, ... }
+ *   dofs:        array of { name, parent, child, axis, defaultDeg, rangeDeg, limitDeg, ... }
  *
  * This module does NOT ship any fallback/placeholder anatomy. If the source
  * data is missing, malformed, or a mesh fails to parse, loadFly() throws
- * rather than silently drawing a dummy body.
+ * rather than silently drawing a dummy body. There are no independent
+ * accessories in this file either: the rig is anatomy only.
  *
  * Coordinate conversion (+Z-up source -> +Y-up three.js):
  *   The entire rig is assembled in the source's native +Z-up convention
@@ -29,13 +30,37 @@
  *   happens exactly ONCE, as a single -90 degree rotation about X applied to
  *   the top-level group that contains the root joint. Nothing else in this
  *   file adds a second vertical offset or a second axis swap, so the root's
- *   z = 1.3 height is never double-counted.
+ *   z = 1.3 height is never double-counted. The simplified ragdoll below
+ *   follows the same rule: its root sink/tilt targets already bake in the
+ *   ragdoll blend weight, so they are applied once, not multiplied again.
  *
  * No primitive spheres are used for anatomy. Every anatomical mesh comes from
  * a real STL parsed into a non-indexed BufferGeometry (no vertex welding),
  * with normals recomputed after parsing (and after mirroring, so winding is
- * fixed first). The only primitive geometry in this file builds the
- * right-foreleg vape prop, which is an independent accessory, not anatomy.
+ * fixed first).
+ *
+ * Returned rig API:
+ *   group                                       - THREE.Group, add this to your scene
+ *   update(timeSeconds, walkingStrength, mood, options)
+ *     - backward compatible with the original 3-argument call.
+ *     - options: {
+ *         pose: 'walk' | 'typing' | 'collapsed',   // default 'walk'
+ *         typingRate: number,                      // keystrokes/sec, 0..12
+ *         fatigue: number,                         // 0..1
+ *         dt: number,                               // seconds; clamped to <= 1/30
+ *       }
+ *   parts                                        - { [segmentName]: THREE.Object3D }
+ *   setRagdoll(weight)                           - 0 (fully animated) .. 1 (fully physics-driven)
+ *   applyImpulse(worldDirection: THREE.Vector3, strength: number) - poke reaction
+ *   isRagdolling()                               - true while ragdoll weight > 0
+ *   floorY                                       - world-space floor height (get/set), default 0
+ *
+ * Ragdoll disclaimer: this is a deliberately simplified, single-file
+ * approximation - independent per-DOF angular spring-dampers plus a small
+ * rigid-body spring for the root's pitch/roll/sink, with a crude leg-tip
+ * floor projection. It is NOT a real rigid-body/contact physics engine and
+ * makes no such claim; it exists to give a believable "gone limp" look
+ * without pulling in an external physics library.
  */
 
 // ---------------------------------------------------------------------------
@@ -302,9 +327,9 @@ function findLegTip(prefix, model) {
   return pool[pool.length - 1];
 }
 
-// Computes a joint-angle delta (degrees) for a single DOF at time t.
-// Defaults to the DOF's rest/default angle; procedural drivers (tripod gait,
-// antenna flick) layer motion on top of that default.
+// Computes a joint-angle delta (degrees) for a single DOF at time t, for the
+// default 'walk' pose. Defaults to the DOF's rest/default angle; procedural
+// drivers (tripod gait, antenna flick) layer motion on top of that default.
 function driveDof(dof, t, walk, moodK) {
   const base = dof.defaultDeg || 0;
   const child = dof.child;
@@ -334,64 +359,58 @@ function driveDof(dof, t, walk, moodK) {
   return base;
 }
 
-// ---------------------------------------------------------------------------
-// Right-foreleg vape accessory (independent prop, not anatomy - no spheres)
-// ---------------------------------------------------------------------------
+// Computes a joint-angle delta (degrees) for the 'typing' pose: the fly
+// stands still and taps its front legs like fingers on a keyboard, while
+// mid/hind legs hold a steady stance, the head nods, antennae twitch, and
+// wings stay folded (no drive applied to them at all).
+function driveTyping(dof, t, typingRate, fatigue, moodK) {
+  const base = dof.defaultDeg || 0;
+  const child = dof.child;
 
-function buildVapeAccessory(THREE, tipNode) {
-  const group = new THREE.Group();
-  group.name = 'accessory_vape';
-
-  const bodyMat = new THREE.MeshStandardMaterial({ color: 0x1c1c22, metalness: 0.6, roughness: 0.35 });
-  const tipMat = new THREE.MeshStandardMaterial({
-    color: 0x3a7bd5,
-    metalness: 0.2,
-    roughness: 0.2,
-    emissive: 0x0a1a33,
-    emissiveIntensity: 0.4,
-  });
-
-  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.006, 0.007, 0.03, 12), bodyMat);
-  body.rotation.z = Math.PI / 2;
-  body.position.set(0.02, 0, 0);
-  group.add(body);
-
-  const mouth = new THREE.Mesh(new THREE.CylinderGeometry(0.0025, 0.004, 0.008, 10), tipMat);
-  mouth.rotation.z = Math.PI / 2;
-  mouth.position.set(0.038, 0, 0);
-  group.add(mouth);
-
-  const puffs = [];
-  for (let i = 0; i < 3; i++) {
-    const puffMat = new THREE.MeshStandardMaterial({
-      color: 0xe8f0f8,
-      transparent: true,
-      opacity: 0,
-      roughness: 1,
-      metalness: 0,
-    });
-    const puff = new THREE.Mesh(new THREE.ConeGeometry(0.004 + i * 0.002, 0.01 + i * 0.006, 6, 1, true), puffMat);
-    puff.position.set(0.045 + i * 0.006, 0, 0);
-    puff.rotation.z = -Math.PI / 2;
-    group.add(puff);
-    puffs.push(puff);
+  if (/head/i.test(child) && dof.axis === 'pitch') {
+    const droop = 15 * fatigue; // tired posture: head droops as fatigue rises
+    const nod = 3 * Math.sin(2 * Math.PI * Math.max(0.5, typingRate) * t);
+    return base + droop + nod;
   }
 
-  group.position.set(0.01, -0.004, 0.002);
-  tipNode.add(group);
-  return { group, puffs };
+  if (/wing/i.test(child)) {
+    return base; // wings folded: never driven while typing
+  }
+
+  if (/antenna/i.test(child)) {
+    const off = hashOffset(child);
+    const amp = dof.axis === 'pitch' ? 4 : dof.axis === 'yaw' ? 3 : 0;
+    return base + amp * moodK * Math.sin(t * 5.0 + off) * Math.sin(t * 11.0 + off * 1.7);
+  }
+
+  const leg = legInfoFromChild(child);
+  if (leg && dof.axis === 'pitch') {
+    const amp = Math.max(0, 1 - fatigue); // tapping amplitude shrinks with fatigue
+    const isFront = leg.key === 'lf' || leg.key === 'rf';
+    if (isFront) {
+      const rate = Math.max(0, typingRate);
+      const tapPhase = leg.key === 'lf' ? 0 : Math.PI; // alternate hands
+      const tapWave = rate > 0 ? Math.max(0, Math.sin(2 * Math.PI * rate * t + tapPhase)) : 0;
+      if (/trochanterfemur$/.test(child)) return base - amp * 10 * tapWave; // reach forward/down
+      if (/tibia$/.test(child)) return base + amp * 18 * tapWave; // tap down
+      return base;
+    }
+    // Mid/hind legs: steady standing stance, no gait cycling while typing.
+    if (/trochanterfemur$/.test(child)) return base + 4 * amp;
+    return base;
+  }
+
+  return base;
 }
 
-function animateVape(vape, t, moodK) {
-  const cycle = 4.0 / Math.max(0.3, moodK);
-  const phase = (t % cycle) / cycle;
-  vape.puffs.forEach((puff, i) => {
-    const local = Math.min(1, Math.max(0, phase * 3 - i));
-    const grow = Math.sin(Math.min(1, local) * Math.PI);
-    puff.material.opacity = 0.35 * grow;
-    const s = 0.6 + grow * 0.8;
-    puff.scale.set(s, s, s);
-  });
+function dofKeyOf(dof) {
+  return `${dof.child}::${dof.axis}`;
+}
+
+function jointLimitsOf(dof) {
+  if (Array.isArray(dof.limitDeg) && dof.limitDeg.length === 2) return dof.limitDeg;
+  if (Array.isArray(dof.rangeDeg) && dof.rangeDeg.length === 2) return dof.rangeDeg;
+  return [-90, 90]; // generic fallback clamp when the model doesn't specify one
 }
 
 // ---------------------------------------------------------------------------
@@ -403,7 +422,15 @@ function animateVape(vape, t, moodK) {
  *
  * @param {object} THREE - the three.js module/namespace (injected, not imported).
  * @param {(fraction:number)=>void} [onProgress] - optional load-progress callback (0..1).
- * @returns {Promise<{group:object, update:(timeSeconds:number, walkingStrength?:number, mood?:(string|number))=>void, parts:Record<string,object>}>}
+ * @returns {Promise<{
+ *   group:object,
+ *   update:(timeSeconds:number, walkingStrength?:number, mood?:(string|number), options?:object)=>void,
+ *   parts:Record<string,object>,
+ *   setRagdoll:(weight:number)=>void,
+ *   applyImpulse:(worldDirection:object, strength:number)=>void,
+ *   isRagdolling:()=>boolean,
+ *   floorY:number,
+ * }>}
  */
 export async function loadFly(THREE, onProgress) {
   if (!THREE || !THREE.Object3D || !THREE.BufferGeometry) {
@@ -497,7 +524,7 @@ export async function loadFly(THREE, onProgress) {
     report(0.1 + 0.8 * (loaded / meshEntries.length));
   }
 
-  // --- Degrees of freedom ---------------------------------------------------
+  // --- Degrees of freedom, grouped by the joint (child segment) they drive -
   const dofsByChild = new Map();
   for (const dof of model.dofs) {
     if (!dof || typeof dof.child !== 'string' || typeof dof.axis !== 'string') {
@@ -513,14 +540,48 @@ export async function loadFly(THREE, onProgress) {
     dofsByChild.get(dof.child).push(dof);
   }
 
-  // --- Right-foreleg vape accessory (independent prop, optional) -----------
-  const vapeTipName = findLegTip('rf_', model);
-  let vape = null;
-  if (vapeTipName && nodes.has(vapeTipName)) {
-    vape = buildVapeAccessory(THREE, nodes.get(vapeTipName));
-  } else {
-    console.warn('fly_rig: could not locate a right-foreleg tip segment for the vape accessory; skipping it');
+  // --- Simplified ragdoll state --------------------------------------------
+  // Only leg joints and head/abdomen joints get a physics state; everything
+  // else (eyes, wings, thorax internals) stays fully animated regardless of
+  // ragdoll weight, since they have no meaningful "go limp" behaviour.
+  const physicsDofIndex = new Map(); // dofKey -> dof
+  for (const dof of model.dofs) {
+    const isLeg = !!legInfoFromChild(dof.child);
+    const isHead = /head/i.test(dof.child);
+    const isAbdomen = /abdomen/i.test(dof.child);
+    if (isLeg || isHead || isAbdomen) {
+      physicsDofIndex.set(dofKeyOf(dof), dof);
+    }
   }
+  const physState = new Map(); // dofKey -> { angleDeg, angularVel }
+  for (const [key, dof] of physicsDofIndex) {
+    physState.set(key, { angleDeg: dof.defaultDeg || 0, angularVel: 0 });
+  }
+
+  // Leg tips used for the floor-contact approximation: last tarsus segment
+  // per leg, paired with that leg's main swing DOF (coxa -> trochanterfemur
+  // pitch) when one exists in the physics index.
+  const legTips = [];
+  for (const prefix of ['lf_', 'rf_', 'lm_', 'rm_', 'lh_', 'rh_']) {
+    const tipName = findLegTip(prefix, model);
+    if (!tipName || !nodes.has(tipName)) continue;
+    const swingChildName = model.segments.find((s) => s.startsWith(prefix) && /trochanterfemur$/.test(s));
+    const swingDof = swingChildName ? dofsByChild.get(swingChildName)?.find((d) => d.axis === 'pitch') : null;
+    legTips.push({
+      node: nodes.get(tipName),
+      swingDof: swingDof || null,
+      swingDofKey: swingDof ? dofKeyOf(swingDof) : null,
+    });
+  }
+
+  // Simplified rigid-body state for the root (thorax): a small pitch/roll
+  // spring plus a vertical "sink" spring, both driven toward targets that
+  // scale with the current ragdoll weight (see stepRootPhysics below).
+  const rootPhysics = { pitchDeg: 0, pitchVel: 0, rollDeg: 0, rollVel: 0, sinkZ: 0, sinkVel: 0, fallSign: 1 };
+
+  const state = { ragdollWeight: 0, floorY: 0 };
+  let lastUpdateT = null;
+  const _floorProbe = new THREE.Vector3();
 
   report(1);
 
@@ -539,32 +600,197 @@ export async function loadFly(THREE, onProgress) {
     return q;
   }
 
+  // Advances every physics-enabled joint by one semi-implicit Euler step:
+  // velocity is integrated first from spring + damping + a crude gravity-like
+  // torque, then position is integrated from the updated velocity. This is a
+  // simplified per-DOF approximation, not a coupled rigid-body simulation.
+  function stepPhysics(dt) {
+    if (dt <= 0) return;
+    const SPRING_K = 14;
+    const DAMPING_C = 5;
+    const GRAVITY_K = 22;
+    for (const [key, dof] of physicsDofIndex) {
+      const s = physState.get(key);
+      const restAngle = dof.defaultDeg || 0;
+      const rel = s.angleDeg - restAngle;
+      const gravityTorque = GRAVITY_K * Math.sin(THREE.MathUtils.degToRad(rel));
+      const springTorque = -SPRING_K * rel;
+      const dampTorque = -DAMPING_C * s.angularVel;
+      const accel = springTorque + dampTorque + gravityTorque;
+      s.angularVel += accel * dt;
+      s.angleDeg += s.angularVel * dt;
+      const [lo, hi] = jointLimitsOf(dof);
+      if (s.angleDeg < lo) {
+        s.angleDeg = lo;
+        s.angularVel *= -0.15;
+      } else if (s.angleDeg > hi) {
+        s.angleDeg = hi;
+        s.angularVel *= -0.15;
+      }
+    }
+  }
+
+  // Crude floor contact: if a leg tip's world position sinks below floorY,
+  // nudge that leg's main swing joint back toward its rest angle (a rough
+  // position projection) and damp its velocity (approximate friction). This
+  // is not a real contact solver; it only prevents the most obvious visual
+  // floor penetration during the ragdoll blend.
+  function resolveFloorContacts(dt) {
+    if (dt <= 0) return;
+    for (const tip of legTips) {
+      if (!tip.swingDof) continue;
+      tip.node.getWorldPosition(_floorProbe);
+      const penetration = state.floorY - _floorProbe.y;
+      if (penetration <= 0) continue;
+      const s = physState.get(tip.swingDofKey);
+      if (!s) continue;
+      const restAngle = tip.swingDof.defaultDeg || 0;
+      const dir = Math.sign(restAngle - s.angleDeg) || 1;
+      const correction = Math.min(60, penetration * 400) * dt;
+      s.angleDeg += dir * correction;
+      s.angularVel *= 0.55; // friction: bleed velocity while in contact
+    }
+  }
+
+  // Simplified rigid-body spring for the root: pitch/roll tilt over toward a
+  // "fallen on its side" pose and sinks toward the floor as ragdoll weight
+  // rises, and springs back upright as weight returns to 0. Targets already
+  // scale by the current weight, so callers must not multiply by weight again.
+  function stepRootPhysics(dt) {
+    if (dt <= 0) return;
+    const w = state.ragdollWeight;
+    const targetPitch = 8 * w;
+    const targetRoll = 70 * w * rootPhysics.fallSign;
+    const targetSink = -0.9 * w;
+    const K = 30;
+    const C = 9;
+
+    rootPhysics.pitchVel += (-K * (rootPhysics.pitchDeg - targetPitch) - C * rootPhysics.pitchVel) * dt;
+    rootPhysics.pitchDeg += rootPhysics.pitchVel * dt;
+
+    rootPhysics.rollVel += (-K * (rootPhysics.rollDeg - targetRoll) - C * rootPhysics.rollVel) * dt;
+    rootPhysics.rollDeg += rootPhysics.rollVel * dt;
+
+    rootPhysics.sinkVel += (-K * (rootPhysics.sinkZ - targetSink) - C * rootPhysics.sinkVel) * dt;
+    rootPhysics.sinkZ += rootPhysics.sinkVel * dt;
+  }
+
   /**
-   * Advances the rig's pose. Safe to call every frame.
+   * Advances the rig's pose. Safe to call every frame. Backward compatible:
+   * calling update(t, walkingStrength, mood) with no options behaves exactly
+   * as before.
    * @param {number} timeSeconds - monotonic animation clock, in seconds.
-   * @param {number} [walkingStrength] - 0 (stationary) .. 1 (full tripod gait).
+   * @param {number} [walkingStrength] - 0 (stationary) .. 1 (full tripod gait). Used in the 'walk' pose.
    * @param {string|number} [mood] - 'calm'|'neutral'|'curious'|'excited'|'agitated', or a numeric scalar.
+   * @param {object} [options]
+   * @param {('walk'|'typing'|'collapsed')} [options.pose] - defaults to 'walk'.
+   * @param {number} [options.typingRate] - keystrokes/sec, 0..12, used in the 'typing' pose.
+   * @param {number} [options.fatigue] - 0..1, used in the 'typing' pose.
+   * @param {number} [options.dt] - explicit frame delta in seconds; clamped to <= 1/30.
    */
-  function update(timeSeconds, walkingStrength, mood) {
+  function update(timeSeconds, walkingStrength, mood, options) {
+    const opts = options || {};
     const t = typeof timeSeconds === 'number' && Number.isFinite(timeSeconds) ? timeSeconds : 0;
+
+    let dt = typeof opts.dt === 'number' && Number.isFinite(opts.dt)
+      ? opts.dt
+      : (lastUpdateT === null ? 1 / 60 : t - lastUpdateT);
+    dt = Math.max(0, Math.min(dt, 1 / 30)); // keep the simplified physics stable
+    lastUpdateT = t;
+
     const walk = Math.min(1, Math.max(0, walkingStrength || 0));
     const moodK = moodScalar(mood !== undefined ? mood : 'neutral');
+    const pose = opts.pose === 'typing' || opts.pose === 'collapsed' ? opts.pose : 'walk';
+    const typingRate = Math.min(12, Math.max(0, opts.typingRate || 0));
+    const fatigue = Math.min(1, Math.max(0, opts.fatigue || 0));
+
+    stepPhysics(dt);
+    resolveFloorContacts(dt);
+    stepRootPhysics(dt);
+
+    const weight = state.ragdollWeight;
 
     for (const [child, dofList] of dofsByChild) {
       const node = nodes.get(child);
       const angles = {};
       for (const dof of dofList) {
-        angles[dof.axis] = driveDof(dof, t, walk, moodK);
+        let animated;
+        if (pose === 'typing') animated = driveTyping(dof, t, typingRate, fatigue, moodK);
+        else if (pose === 'collapsed') animated = dof.defaultDeg || 0;
+        else animated = driveDof(dof, t, walk, moodK);
+
+        const key = dofKeyOf(dof);
+        const physicsState = physState.get(key);
+        angles[dof.axis] = physicsState ? animated + (physicsState.angleDeg - animated) * weight : animated;
       }
       node.quaternion.copy(node.userData.restQuaternion).multiply(composeDelta(angles));
     }
 
-    if (vape) animateVape(vape, t, moodK);
+    // Root: tired posture sinks the body while typing (fades out as the
+    // ragdoll takes over), plus the ragdoll's own settle/tilt on top.
+    const restPos = rootNode.userData.restPosition;
+    const restQuat = rootNode.userData.restQuaternion;
+    const tiredSinkZ = pose === 'typing' ? -0.05 * fatigue * (1 - weight) : 0;
+    rootNode.position.set(restPos.x, restPos.y, restPos.z + tiredSinkZ + rootPhysics.sinkZ);
+
+    const ragdollTilt = new THREE.Quaternion()
+      .setFromAxisAngle(new THREE.Vector3(0, 1, 0), THREE.MathUtils.degToRad(rootPhysics.pitchDeg))
+      .multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), THREE.MathUtils.degToRad(rootPhysics.rollDeg)));
+    rootNode.quaternion.copy(restQuat).multiply(ragdollTilt);
+  }
+
+  /**
+   * Blends the rig from fully animated (0) to fully physics-driven (1).
+   * @param {number} weight
+   */
+  function setRagdoll(weight) {
+    const w = Math.min(1, Math.max(0, typeof weight === 'number' && Number.isFinite(weight) ? weight : 0));
+    if (state.ragdollWeight <= 0 && w > 0) {
+      rootPhysics.fallSign = Math.random() < 0.5 ? -1 : 1;
+    }
+    state.ragdollWeight = w;
+  }
+
+  /**
+   * Kicks the ragdoll's angular velocities, e.g. in response to the fly
+   * being poked. Has no visible effect unless the ragdoll weight is > 0.
+   * @param {object} worldDirection - THREE.Vector3-like {x,y,z} in world space.
+   * @param {number} strength
+   */
+  function applyImpulse(worldDirection, strength) {
+    if (!worldDirection || typeof strength !== 'number' || !Number.isFinite(strength)) return;
+    const dir = new THREE.Vector3(worldDirection.x || 0, worldDirection.y || 0, worldDirection.z || 0);
+    if (dir.lengthSq() === 0) return;
+    dir.normalize();
+    // Undo the single group-level +Z-up -> +Y-up rotation to bring the poke
+    // direction back into the rig's native local space.
+    dir.applyQuaternion(group.quaternion.clone().invert());
+
+    const kick = Math.max(0, strength) * 40;
+    for (const key of physicsDofIndex.keys()) {
+      const s = physState.get(key);
+      if (!s) continue;
+      s.angularVel += kick * (Math.random() * 0.6 + 0.4) * (dir.z >= 0 ? 1 : -1);
+    }
+    rootPhysics.pitchVel += dir.z * Math.max(0, strength) * 25;
+    rootPhysics.rollVel += -dir.x * Math.max(0, strength) * 25;
   }
 
   const parts = {};
   for (const [name, node] of nodes) parts[name] = node;
-  if (vape) parts.accessory_vape = vape.group;
 
-  return { group, update, parts };
+  return {
+    group,
+    update,
+    parts,
+    setRagdoll,
+    applyImpulse,
+    isRagdolling: () => state.ragdollWeight > 0,
+    get floorY() {
+      return state.floorY;
+    },
+    set floorY(value) {
+      state.floorY = typeof value === 'number' && Number.isFinite(value) ? value : 0;
+    },
+  };
 }
