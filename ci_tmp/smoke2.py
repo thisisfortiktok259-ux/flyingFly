@@ -3,11 +3,14 @@
 
 Usage: smoke2.py <watch_seconds> [url_suffix]
 
-Every Playwright call is wrapped with a short timeout and a try/except, so a
-blocked page main thread produces STALLED lines instead of hanging the job.
+The page blocks its main thread for minutes while it loads connectome data,
+and page.evaluate is NOT governed by Playwright's default timeout, so a
+blocked evaluate simply waits. That is used deliberately here: the first
+evaluate returns the instant the main thread frees up. SIGALRM is the only
+hard bound.
+
 All output is ASCII-escaped because Actions logs mangle UTF-8 Cyrillic.
 """
-import io
 import json
 import os
 import signal
@@ -18,6 +21,7 @@ import urllib.request
 
 WATCH = int(sys.argv[1]) if len(sys.argv) > 1 else 25
 SUFFIX = sys.argv[2] if len(sys.argv) > 2 else ''
+TICK = 30
 BASE = 'http://127.0.0.1:8085'
 URL = BASE + '/' + SUFFIX
 HARD_LIMIT = WATCH + 120
@@ -64,7 +68,6 @@ failed = []
 
 
 def safe(label, fn, default=None):
-    """Run a page call, reporting a stall instead of hanging."""
     try:
         return fn()
     except Exception as exc:
@@ -83,31 +86,36 @@ with sync_playwright() as pw:
         '--disable-gpu-sandbox',
     ])
     page = browser.new_page(viewport={'width': 1280, 'height': 800})
-    page.set_default_timeout(6000)
+    page.set_default_timeout(10000)
     page.on('console', lambda m: console.append((m.type, m.text[:300])))
     page.on('pageerror', lambda e: page_errors.append(str(e)[:300]))
     page.on('requestfailed',
             lambda r: failed.append('%s %s' % (r.url[:120],
                                                r.failure or 'unknown')))
 
+    started = time.time()
     safe('goto', lambda: page.goto(URL, wait_until='domcontentloaded',
-                                   timeout=30000))
-    out('page loaded, watching for %ds' % WATCH)
+                                   timeout=60000))
+    out('page loaded at t=%.1fs, watching up to %ds (tick %ds)'
+        % (time.time() - started, WATCH, TICK))
 
     debug = None
-    deadline = time.time() + WATCH
-    tick = 0
+    deadline = started + WATCH
     while time.time() < deadline:
-        time.sleep(5)
-        tick += 5
-        got = safe('evaluate __debug t=%ds' % tick,
+        got = safe('evaluate __debug',
                    lambda: page.evaluate('() => window.__debug ? '
                                          'JSON.stringify(window.__debug) : null'))
+        elapsed = time.time() - started
         if got:
             debug = json.loads(got)
-            out('t=%02ds %s' % (tick, got[:420]))
+            out('t=%03.0fs %s' % (elapsed, got[:460]))
+            # Once the loop is alive, sample a few more times to prove that
+            # the comment counter actually advances.
+            if debug.get('comments', 0) > 0:
+                break
         else:
-            out('t=%02ds __debug=null' % tick)
+            out('t=%03.0fs __debug=null' % elapsed)
+        time.sleep(TICK)
 
     def text_of(sel):
         return safe('text %s' % sel,
@@ -145,7 +153,13 @@ with sync_playwright() as pw:
 
     os.makedirs('artifacts', exist_ok=True)
     safe('screenshot', lambda: page.screenshot(path='artifacts/page.png',
-                                               timeout=15000))
+                                               timeout=20000))
+
+    final = safe('final __debug',
+                 lambda: page.evaluate('() => window.__debug ? '
+                                       'JSON.stringify(window.__debug) : null'))
+    if final:
+        debug = json.loads(final)
 
     out('')
     out('== PAGE ERRORS (%d) ==' % len(page_errors))
