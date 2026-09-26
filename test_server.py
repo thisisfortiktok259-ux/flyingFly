@@ -342,6 +342,13 @@ class NeuronSampleMockedTestCase(unittest.TestCase):
             self.assertIn("nt", point)
 
     def test_list_of_dicts_rows_are_parsed(self):
+        """_build_neuron_sample uniformly scales all three axes by the same
+        divisor (the largest half-range among x/y/z, so shape/aspect ratio
+        is preserved rather than each axis being independently stretched to
+        fill [-1, 1]). With x-range [-10, 10] but z-range [-30, 30], the
+        largest half-range is 30 (from z), so normalized x is +/-10/30, not
+        +/-1.
+        """
         manifest = {
             "dataset": "MaleCNS v1.0",
             "neurons": 2,
@@ -371,7 +378,8 @@ class NeuronSampleMockedTestCase(unittest.TestCase):
 
         self.assertEqual(len(sample["points"]), 2)
         xs = {round(p["x"], 3) for p in sample["points"]}
-        self.assertEqual(xs, {-1.0, 1.0})
+        expected = {round(-10 / 30, 3), round(10 / 30, 3)}
+        self.assertEqual(xs, expected)
 
     def test_rows_missing_soma_location_are_skipped_not_fabricated(self):
         manifest = {
@@ -427,7 +435,6 @@ class SafeGunzipTestCase(unittest.TestCase):
         compressed = gzip.compress(original)
         with self.assertRaises(ValueError):
             srv._safe_gunzip(compressed, max_output_bytes=1024)  # 1 KiB cap
-
 
 if __name__ == "__main__":
     unittest.main()
