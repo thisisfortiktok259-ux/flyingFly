@@ -87,7 +87,15 @@ import { loadFly } from './fly_rig.js';
 
   const FLY_TARGET_LENGTH = 1.0; // desired longest bounding-box dimension, world units
 
-  const BASE_TYPING_CHARS_PER_SEC = 3.4;
+  // Fast enough that one comment completes in roughly ten seconds at
+  // normal fatigue, even when the motor factor sits at its floor.
+  const BASE_TYPING_CHARS_PER_SEC = 8.0;
+  const MIN_TYPING_CHARS_PER_SEC = 2.5;
+  const MOTOR_FACTOR_MIN = 0.6;
+  const MOTOR_FACTOR_MAX = 1.6;
+  // Smoke-test escape hatch: ?nosim=1 skips the connectome sim, whose
+  // load blocks the main thread for minutes on a CI runner.
+  const SKIP_NEURO_SIM = /[?&]nosim=1(?:&|$)/.test(location.search);
   const FATIGUE_PER_KEYSTROKE = 0.011;
   const FATIGUE_PER_SECOND_TYPING = 0.006;
   const FATIGUE_RECOVERY_PER_SECOND = 0.0022;
@@ -1136,187 +1144,187 @@ import { loadFly } from './fly_rig.js';
     return true;
   }
 
-      // =====================================================================
-    // CAMERA CONTROLS (OrbitControls) + debug hook
-    // =====================================================================
-    const cameraCtl = {
-        world: null,
-        brain: null,
-        follow: true,
-        hint: null,
-        button: null,
+  // =====================================================================
+  // CAMERA CONTROLS (OrbitControls) + debug hook
+  // =====================================================================
+  const cameraCtl = {
+    world: null,
+    brain: null,
+    follow: true,
+    hint: null,
+    button: null,
+  };
+
+  function attachOrbit(camera, canvas, opts) {
+    const controls = new OrbitControls(camera, canvas);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+    controls.rotateSpeed = 0.9;
+    controls.zoomSpeed = 0.9;
+    controls.panSpeed = 0.8;
+    controls.enablePan = true;
+    controls.screenSpacePanning = false;
+    controls.minDistance = opts.minDistance;
+    controls.maxDistance = opts.maxDistance;
+    controls.target.copy(opts.target);
+    controls.mouseButtons = {
+      LEFT: THREE.MOUSE.ROTATE,
+      MIDDLE: THREE.MOUSE.DOLLY,
+      RIGHT: THREE.MOUSE.PAN,
     };
+    controls.touches = {
+      ONE: THREE.TOUCH.ROTATE,
+      TWO: THREE.TOUCH.DOLLY_PAN,
+    };
+    canvas.style.touchAction = 'none';
+    canvas.addEventListener('contextmenu', (ev) => ev.preventDefault());
+    controls.update();
+    return controls;
+  }
 
-    function attachOrbit(camera, canvas, opts) {
-        const controls = new OrbitControls(camera, canvas);
-        controls.enableDamping = true;
-        controls.dampingFactor = 0.08;
-        controls.rotateSpeed = 0.9;
-        controls.zoomSpeed = 0.9;
-        controls.panSpeed = 0.8;
-        controls.enablePan = true;
-        controls.screenSpacePanning = false;
-        controls.minDistance = opts.minDistance;
-        controls.maxDistance = opts.maxDistance;
-        controls.target.copy(opts.target);
-        controls.mouseButtons = {
-            LEFT: THREE.MOUSE.ROTATE,
-            MIDDLE: THREE.MOUSE.DOLLY,
-            RIGHT: THREE.MOUSE.PAN,
-        };
-        controls.touches = {
-            ONE: THREE.TOUCH.ROTATE,
-            TWO: THREE.TOUCH.DOLLY_PAN,
-        };
-        canvas.style.touchAction = 'none';
-        canvas.addEventListener('contextmenu', (ev) => ev.preventDefault());
-        controls.update();
-        return controls;
-    }
-
-    // Where the camera should look: the fly when it exists, otherwise the
-    // spot on the desk where it is about to appear.
-    function flyFocusPoint(out) {
-        const point = out || new THREE.Vector3();
-        if (fly.root) {
-            const box = new THREE.Box3().setFromObject(fly.root);
-            if (!box.isEmpty()) {
-                box.getCenter(point);
-                return point;
-            }
-            fly.root.getWorldPosition(point);
-            return point;
-        }
-        point.set(
-            world.laptopPos ? world.laptopPos.x : 0,
-            (world.deskTopY || 0.75) + 0.06,
-            world.laptopPos ? world.laptopPos.z : 0,
-        );
+  // Where the camera should look: the fly when it exists, otherwise the
+  // spot on the desk where it is about to appear.
+  function flyFocusPoint(out) {
+    const point = out || new THREE.Vector3();
+    if (fly.root) {
+      const box = new THREE.Box3().setFromObject(fly.root);
+      if (!box.isEmpty()) {
+        box.getCenter(point);
         return point;
+      }
+      fly.root.getWorldPosition(point);
+      return point;
     }
+    point.set(
+      world.laptopPos ? world.laptopPos.x : 0,
+      (world.deskTopY || 0.75) + 0.06,
+      world.laptopPos ? world.laptopPos.z : 0,
+    );
+    return point;
+  }
 
-    function buildCameraUi() {
-        const host = dom.worldCanvas && dom.worldCanvas.parentElement;
-        if (!host || cameraCtl.hint) return;
-        if (window.getComputedStyle(host).position === 'static') {
-            host.style.position = 'relative';
-        }
-        const hint = document.createElement('p');
-        hint.className = 'camera-hint';
-        hint.textContent =
-            '\u041b\u041a\u041c \u2014 \u0432\u0440\u0430\u0449\u0430\u0442\u044c, '
-            + '\u043a\u043e\u043b\u0435\u0441\u043e \u2014 '
-            + '\u043f\u0440\u0438\u0431\u043b\u0438\u0436\u0430\u0442\u044c, '
-            + '\u041f\u041a\u041c \u2014 '
-            + '\u0441\u0434\u0432\u0438\u0433\u0430\u0442\u044c';
-        hint.style.cssText = 'position:absolute;left:10px;bottom:10px;margin:0;'
-            + 'padding:4px 8px;border-radius:6px;font-size:11px;line-height:1.35;'
-            + 'background:rgba(6,9,16,0.6);color:#cfd6e4;pointer-events:none;'
-            + 'z-index:4;';
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'camera-focus-btn';
-        button.textContent =
-            '\u041a\u0430\u043c\u0435\u0440\u0430 \u043d\u0430 '
-            + '\u043c\u0443\u0445\u0443';
-        button.style.cssText = 'position:absolute;right:10px;bottom:10px;'
-            + 'padding:5px 10px;border-radius:6px;border:1px solid #47506a;'
-            + 'background:rgba(12,16,26,0.82);color:#e6ebf5;font-size:11px;'
-            + 'cursor:pointer;z-index:5;';
-        button.addEventListener('click', () => {
-            cameraCtl.follow = true;
-            recenterOnFly(true);
-        });
-        host.appendChild(hint);
-        host.appendChild(button);
-        cameraCtl.hint = hint;
-        cameraCtl.button = button;
+  function buildCameraUi() {
+    const host = dom.worldCanvas && dom.worldCanvas.parentElement;
+    if (!host || cameraCtl.hint) return;
+    if (window.getComputedStyle(host).position === 'static') {
+      host.style.position = 'relative';
     }
+    const hint = document.createElement('p');
+    hint.className = 'camera-hint';
+    hint.textContent =
+      '\u041b\u041a\u041c \u2014 \u0432\u0440\u0430\u0449\u0430\u0442\u044c, '
+      + '\u043a\u043e\u043b\u0435\u0441\u043e \u2014 '
+      + '\u043f\u0440\u0438\u0431\u043b\u0438\u0436\u0430\u0442\u044c, '
+      + '\u041f\u041a\u041c \u2014 '
+      + '\u0441\u0434\u0432\u0438\u0433\u0430\u0442\u044c';
+    hint.style.cssText = 'position:absolute;left:10px;bottom:10px;margin:0;'
+      + 'padding:4px 8px;border-radius:6px;font-size:11px;line-height:1.35;'
+      + 'background:rgba(6,9,16,0.6);color:#cfd6e4;pointer-events:none;'
+      + 'z-index:4;';
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'camera-focus-btn';
+    button.textContent =
+      '\u041a\u0430\u043c\u0435\u0440\u0430 \u043d\u0430 '
+      + '\u043c\u0443\u0445\u0443';
+    button.style.cssText = 'position:absolute;right:10px;bottom:10px;'
+      + 'padding:5px 10px;border-radius:6px;border:1px solid #47506a;'
+      + 'background:rgba(12,16,26,0.82);color:#e6ebf5;font-size:11px;'
+      + 'cursor:pointer;z-index:5;';
+    button.addEventListener('click', () => {
+      cameraCtl.follow = true;
+      recenterOnFly(true);
+    });
+    host.appendChild(hint);
+    host.appendChild(button);
+    cameraCtl.hint = hint;
+    cameraCtl.button = button;
+  }
 
-    function recenterOnFly(snapCamera) {
-        if (!cameraCtl.world) return;
-        const focus = flyFocusPoint();
-        cameraCtl.world.target.copy(focus);
-        if (snapCamera) {
-            cameraCtl.world.object.position.copy(focus)
-                .add(new THREE.Vector3(0.34, 0.24, 0.42));
-        }
-        cameraCtl.world.update();
+  function recenterOnFly(snapCamera) {
+    if (!cameraCtl.world) return;
+    const focus = flyFocusPoint();
+    cameraCtl.world.target.copy(focus);
+    if (snapCamera) {
+      cameraCtl.world.object.position.copy(focus)
+        .add(new THREE.Vector3(0.34, 0.24, 0.42));
     }
+    cameraCtl.world.update();
+  }
 
-    function initWorldControls() {
-        if (!world.camera || !dom.worldCanvas || cameraCtl.world) return;
-        cameraCtl.world = attachOrbit(world.camera, dom.worldCanvas, {
-            target: flyFocusPoint(),
-            minDistance: 0.04,
-            maxDistance: 8,
-        });
-        cameraCtl.world.maxPolarAngle = Math.PI * 0.495;
-        // Scripted follow stops the moment the user touches the camera.
-        cameraCtl.world.addEventListener('start', () => {
-            cameraCtl.follow = false;
-        });
-        buildCameraUi();
+  function initWorldControls() {
+    if (!world.camera || !dom.worldCanvas || cameraCtl.world) return;
+    cameraCtl.world = attachOrbit(world.camera, dom.worldCanvas, {
+      target: flyFocusPoint(),
+      minDistance: 0.04,
+      maxDistance: 8,
+    });
+    cameraCtl.world.maxPolarAngle = Math.PI * 0.495;
+    // Scripted follow stops the moment the user touches the camera.
+    cameraCtl.world.addEventListener('start', () => {
+      cameraCtl.follow = false;
+    });
+    buildCameraUi();
+  }
+
+  function initBrainControls() {
+    if (!brain.camera || !dom.brainCanvas || cameraCtl.brain) return;
+    cameraCtl.brain = attachOrbit(brain.camera, dom.brainCanvas, {
+      target: new THREE.Vector3(0, 0, 0),
+      minDistance: 0.4,
+      maxDistance: 14,
+    });
+  }
+
+  function updateCameraControls() {
+    if (cameraCtl.world) {
+      if (cameraCtl.follow && fly.root) {
+        cameraCtl.world.target.lerp(flyFocusPoint(), 0.08);
+      }
+      cameraCtl.world.update();
     }
+    if (cameraCtl.brain) cameraCtl.brain.update();
+  }
 
-    function initBrainControls() {
-        if (!brain.camera || !dom.brainCanvas || cameraCtl.brain) return;
-        cameraCtl.brain = attachOrbit(brain.camera, dom.brainCanvas, {
-            target: new THREE.Vector3(0, 0, 0),
-            minDistance: 0.4,
-            maxDistance: 14,
-        });
-    }
-
-    function updateCameraControls() {
-        if (cameraCtl.world) {
-            if (cameraCtl.follow && fly.root) {
-                cameraCtl.world.target.lerp(flyFocusPoint(), 0.08);
-            }
-            cameraCtl.world.update();
-        }
-        if (cameraCtl.brain) cameraCtl.brain.update();
-    }
-
-    // Scene-graph facts for headless verification.
-    function publishDebug() {
-        const info = {
-            flyLoaded: !!fly.rig,
-            flyScale: fly.scale || null,
-            flyVisible: false,
-            meshCount: 0,
-            flyBox: null,
-            phase: game.phase,
-            comments: game.commentsWritten,
-            fatigue: game.fatigue,
-            motorFactor: game.motorFactor,
-            typedChars: game.typedChars,
-            commentLen: game.currentComment ? game.currentComment.length : null,
-            follow: cameraCtl.follow,
-            hasWorldControls: !!cameraCtl.world,
-            hasBrainControls: !!cameraCtl.brain,
+  // Scene-graph facts for headless verification.
+  function publishDebug() {
+    const info = {
+      flyLoaded: !!fly.rig,
+      flyScale: fly.scale || null,
+      flyVisible: false,
+      meshCount: 0,
+      flyBox: null,
+      phase: game.phase,
+      comments: game.commentsWritten,
+      fatigue: game.fatigue,
+      motorFactor: game.motorFactor,
+      typedChars: game.typedChars,
+      commentLen: game.currentComment ? game.currentComment.length : null,
+      follow: cameraCtl.follow,
+      hasWorldControls: !!cameraCtl.world,
+      hasBrainControls: !!cameraCtl.brain,
+    };
+    if (fly.root) {
+      let meshes = 0;
+      fly.root.traverse((obj) => { if (obj.isMesh) meshes += 1; });
+      info.meshCount = meshes;
+      const box = new THREE.Box3().setFromObject(fly.root);
+      if (!box.isEmpty()) {
+        const size = new THREE.Vector3();
+        const center = new THREE.Vector3();
+        box.getSize(size);
+        box.getCenter(center);
+        info.flyBox = {
+          size: [size.x, size.y, size.z],
+          center: [center.x, center.y, center.z],
         };
-        if (fly.root) {
-            let meshes = 0;
-            fly.root.traverse((obj) => { if (obj.isMesh) meshes += 1; });
-            info.meshCount = meshes;
-            const box = new THREE.Box3().setFromObject(fly.root);
-            if (!box.isEmpty()) {
-                const size = new THREE.Vector3();
-                const center = new THREE.Vector3();
-                box.getSize(size);
-                box.getCenter(center);
-                info.flyBox = {
-                    size: [size.x, size.y, size.z],
-                    center: [center.x, center.y, center.z],
-                };
-                info.flyVisible = fly.root.visible && size.length() > 1e-4;
-            }
-        }
-        window.__debug = info;
+        info.flyVisible = fly.root.visible && size.length() > 1e-4;
+      }
     }
+    window.__debug = info;
+  }
 
-function safeSetRagdoll(weight) {
+  function safeSetRagdoll(weight) {
     if (fly.rig && typeof fly.rig.setRagdoll === 'function') {
       fly.rig.setRagdoll(weight);
     }
@@ -1395,19 +1403,35 @@ function safeSetRagdoll(weight) {
       return;
     }
     const summary = neuroSim.getSummary();
-    const motorRate = (summary.groupRates && summary.groupRates.motor) || 0;
-    if (game.motorBaseline === null) {
+    if (!summary || !summary.groupRates) {
+      game.motorFactor = 1;
+      return;
+    }
+    const rawMotorRate = summary.groupRates.motor;
+    const motorRate = Number.isFinite(rawMotorRate) ? rawMotorRate : 0;
+    if (!Number.isFinite(game.motorBaseline)) {
       game.motorBaseline = Math.max(1, motorRate);
     } else if (game.phase === 'typing') {
-      const w = Math.min(1, MOTOR_BASELINE_SMOOTHING * dtSeconds * 60);
+      const rawW = MOTOR_BASELINE_SMOOTHING * dtSeconds * 60;
+      const w = Number.isFinite(rawW) ? Math.min(1, Math.max(0, rawW)) : 0.05;
       game.motorBaseline = game.motorBaseline * (1 - w) + motorRate * w;
     }
-    const ratio = motorRate / Math.max(1, game.motorBaseline);
-    game.motorFactor = Math.max(0.5, Math.min(2, ratio));
+    const baseline = Number.isFinite(game.motorBaseline)
+      ? Math.max(1, game.motorBaseline)
+      : 1;
+    // Typing must never depend on the sim being healthy. No motor signal
+    // means neutral speed, not slow speed.
+    const ratio = motorRate > 0 ? motorRate / baseline : 1;
+    game.motorFactor = Number.isFinite(ratio)
+      ? Math.max(MOTOR_FACTOR_MIN, Math.min(MOTOR_FACTOR_MAX, ratio))
+      : 1;
 
     const angerHz = ((summary.groupRates && summary.groupRates.dan) || 0) +
       ((summary.groupRates && summary.groupRates.pam) || 0);
-    game.anger = Math.max(0, Math.min(100, (angerHz / 2 / 150) * 100));
+    const angerPct = (angerHz / 2 / 150) * 100;
+    game.anger = Number.isFinite(angerPct)
+      ? Math.max(0, Math.min(100, angerPct))
+      : game.anger;
   }
 
   function stepTyping(dtSeconds) {
@@ -1419,9 +1443,22 @@ function safeSetRagdoll(weight) {
       startNewComment();
     }
 
-    const rate = BASE_TYPING_CHARS_PER_SEC * game.motorFactor * (1 - game.fatigue * 0.5);
-    game.typedCharsAccum += Math.max(0.2, rate) * dtSeconds;
-    const targetChars = Math.min(game.currentComment.length, Math.floor(game.typedCharsAccum));
+    const motor = Number.isFinite(game.motorFactor)
+      ? Math.max(MOTOR_FACTOR_MIN, Math.min(MOTOR_FACTOR_MAX, game.motorFactor))
+      : 1;
+    if (!Number.isFinite(game.fatigue)) game.fatigue = 0;
+    const rate = BASE_TYPING_CHARS_PER_SEC * motor * (1 - game.fatigue * 0.5);
+    if (!Number.isFinite(game.typedCharsAccum)) game.typedCharsAccum = 0;
+    const safeRate = Number.isFinite(rate)
+      ? Math.max(MIN_TYPING_CHARS_PER_SEC, rate)
+      : MIN_TYPING_CHARS_PER_SEC;
+    const safeDt = Number.isFinite(dtSeconds) ? Math.max(0, dtSeconds) : 0;
+    game.typedCharsAccum += safeRate * safeDt;
+    const typedSoFar = Math.floor(game.typedCharsAccum);
+    const targetChars = Math.min(
+      game.currentComment.length,
+      Number.isFinite(typedSoFar) ? Math.max(0, typedSoFar) : 0,
+    );
 
     while (game.typedChars < targetChars) {
       game.typedChars += 1;
@@ -1552,13 +1589,17 @@ function safeSetRagdoll(weight) {
       : (game.phase === 'collapsed' || game.phase === 'beetle_entering' || game.phase === 'poking') ? 'collapsed'
       : 'typing';
     const typingRate = game.phase === 'typing'
-      ? BASE_TYPING_CHARS_PER_SEC * game.motorFactor * (1 - game.fatigue * 0.5)
+      ? BASE_TYPING_CHARS_PER_SEC
+        * (Number.isFinite(game.motorFactor) ? game.motorFactor : 1)
+        * (1 - game.fatigue * 0.5)
       : 0;
 
     if (fly.rig && typeof fly.rig.update === 'function') {
       fly.rig.update(world.clock.getElapsedTime(), 0, 'agitated', {
         pose: flyPose,
-        typingRate: Math.max(0, Math.min(12, typingRate)),
+        typingRate: Number.isFinite(typingRate)
+          ? Math.max(0, Math.min(12, typingRate))
+          : 0,
         fatigue: Math.min(1, game.fatigue),
         dt: dtSeconds,
       });
@@ -1685,7 +1726,12 @@ function safeSetRagdoll(weight) {
     // progress bar and never blocks the rest of the scene.
     if (neuronPayload) {
       const displayIndices = neuronPayload.points.map((p, i) => (typeof p.index === 'number' ? p.index : i));
-      neuroSim = await loadNeuroSim(displayIndices);
+      if (SKIP_NEURO_SIM) {
+        console.warn('[flyingFly] nosim=1: connectome sim skipped');
+        neuroSim = null;
+      } else {
+        neuroSim = await loadNeuroSim(displayIndices);
+      }
     } else {
       neuroSimFailed = true;
       if (dom.backendLabel) dom.backendLabel.textContent = 'Бэкенд: недоступен';
