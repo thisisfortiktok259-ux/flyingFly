@@ -479,6 +479,7 @@ import { loadFly } from './fly_rig.js';
       }
       if (ctx.state === 'suspended') ctx.resume();
       audio.enabled = !audio.enabled;
+      audio.master.gain.value = audio.enabled ? 0.55 : 0;
       dom.soundToggle.setAttribute('aria-pressed', String(audio.enabled));
       const label = dom.soundToggle.querySelector('.sound-label');
       if (label) label.textContent = audio.enabled ? 'Выключить звук' : 'Включить звук';
@@ -1722,6 +1723,9 @@ import { loadFly } from './fly_rig.js';
       setStatus('Муха пишет комментарии.', 'ready');
     }
 
+    startNewComment();
+    requestAnimationFrame(frame);
+
     // Connectome sim loads in the background; the brain panel shows its own
     // progress bar and never blocks the rest of the scene.
     if (neuronPayload) {
@@ -1730,16 +1734,15 @@ import { loadFly } from './fly_rig.js';
         console.warn('[flyingFly] nosim=1: connectome sim skipped');
         neuroSim = null;
       } else {
-        neuroSim = await loadNeuroSim(displayIndices);
+        loadNeuroSim(displayIndices).then((sim) => {
+          neuroSim = sim;
+        });
       }
     } else {
       neuroSimFailed = true;
       if (dom.backendLabel) dom.backendLabel.textContent = 'Бэкенд: недоступен';
       if (dom.brainProgressText) dom.brainProgressText.textContent = 'симуляция недоступна (нет точек для сопоставления)';
     }
-
-    startNewComment();
-    requestAnimationFrame(frame);
   }
 
   init().catch((err) => {

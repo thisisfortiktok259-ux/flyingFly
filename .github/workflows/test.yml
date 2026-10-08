@@ -33,6 +33,9 @@ jobs:
         with:
           node-version: "20"
 
+      - name: Run frontend regression tests
+        run: node --test test_frontend.cjs
+
       # This only parses each frontend file to catch syntax errors; it never
       # executes them and never modifies the originals in the repo. They use
       # ES module `import`/`export` syntax but have no "type": "module" in a
