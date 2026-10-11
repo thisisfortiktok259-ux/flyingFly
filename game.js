@@ -237,8 +237,10 @@ import { loadFly } from './fly_rig.js';
     likesEl.textContent = `♥ ${likes}`;
     li.appendChild(nick);
     li.appendChild(body);
-    li.appendChild(document.createTextNode(' '));
-    li.appendChild(likesEl);
+    if (likes !== null) {
+      li.appendChild(document.createTextNode(' '));
+      li.appendChild(likesEl);
+    }
     dom.commentLog.appendChild(li);
     while (dom.commentLog.children.length > MAX_COMMENT_LOG_ENTRIES) {
       dom.commentLog.removeChild(dom.commentLog.firstChild);
@@ -497,6 +499,11 @@ import { loadFly } from './fly_rig.js';
   let lastSubjectIndex = -1;
 
   function generateComment() {
+    game.currentKind = 'comment';
+    if (Math.random() < 0.3) {
+      game.currentKind = 'prompt';
+      return VIBE_PROMPTS[Math.floor(Math.random() * VIBE_PROMPTS.length)];
+    }
     if (Math.random() < 0.22) {
       return COMMENT_FIXED[Math.floor(Math.random() * COMMENT_FIXED.length)];
     }
@@ -931,6 +938,11 @@ import { loadFly } from './fly_rig.js';
     screenGroup.rotation.x = -0.28;
     world.scene.add(screenGroup);
 
+    fx.lamp = lamp;
+    fx.ambient = ambient;
+    fx.rim = rim;
+    buildRoomExtras();
+
     world.feedCanvas = feedCanvas;
     world.feedCtx = feedCtx;
     world.feedTexture = feedTexture;
@@ -947,7 +959,7 @@ import { loadFly } from './fly_rig.js';
 
     ctx.fillStyle = '#00f3ff';
     ctx.font = 'bold 20px "JetBrains Mono", monospace';
-    ctx.fillText('Комментарии', 16, 30);
+    ctx.fillText('Комментарии + Claude', 16, 30);
     ctx.strokeStyle = 'rgba(0,243,255,0.35)';
     ctx.beginPath();
     ctx.moveTo(16, 42);
@@ -957,12 +969,14 @@ import { loadFly } from './fly_rig.js';
     let y = 66;
     const visible = feedList.slice(-4);
     visible.forEach((c) => {
-      ctx.fillStyle = '#ffb703';
+      ctx.fillStyle = c.nickname === 'Claude' ? '#d97757' : '#ffb703';
       ctx.font = 'bold 15px "JetBrains Mono", monospace';
       ctx.fillText(c.nickname, 16, y);
-      ctx.fillStyle = '#8fa3bf';
-      ctx.font = '12px "JetBrains Mono", monospace';
-      ctx.fillText(`♥ ${c.likes}`, w - 70, y);
+      if (c.likes !== null) {
+        ctx.fillStyle = '#8fa3bf';
+        ctx.font = '12px "JetBrains Mono", monospace';
+        ctx.fillText(`♥ ${c.likes}`, w - 70, y);
+      }
       y += 20;
       ctx.fillStyle = '#e6f1ff';
       ctx.font = '14px Inter, sans-serif';
@@ -982,6 +996,16 @@ import { loadFly } from './fly_rig.js';
     ctx.font = '14px Inter, sans-serif';
     const cursor = cursorOn ? '|' : '';
     wrapText(ctx, `${typingText}${cursor}`, 16, h - 34, w - 32, 18);
+
+    if (fx.bannerTimer > 0 && fx.banner) {
+      ctx.fillStyle = 'rgba(5,7,12,0.82)';
+      ctx.fillRect(0, h / 2 - 44, w, 88);
+      ctx.fillStyle = fx.bannerColor;
+      ctx.font = 'bold 22px "JetBrains Mono", monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(fx.banner, w / 2, h / 2 + 8, w - 24);
+      ctx.textAlign = 'start';
+    }
 
     world.feedTexture.needsUpdate = true;
   }
@@ -1371,6 +1395,7 @@ import { loadFly } from './fly_rig.js';
     motorBaseline: null,
     motorFactor: 1,
     likeTickTimer: 0,
+    currentKind: 'comment',
   };
 
   function startNewComment() {
@@ -1381,10 +1406,11 @@ import { loadFly } from './fly_rig.js';
 
   function postCurrentComment() {
     const likes = Math.floor(Math.random() * 4);
-    const entry = { nickname: COMMENT_NICKNAME, text: game.currentComment, likes };
-    game.feed.push(entry);
-    if (game.feed.length > 12) game.feed.shift();
-    appendCommentToSideLog(entry.nickname, entry.text, entry.likes);
+    pushFeed(COMMENT_NICKNAME, game.currentComment, likes);
+    if (game.currentKind === 'prompt') {
+      pushFeed('Claude', CLAUDE_REPLIES[Math.floor(Math.random() * CLAUDE_REPLIES.length)], null);
+      logEvent('Муха повайбкодила через Claude.');
+    }
     game.commentsWritten += 1;
     if (dom.commentsCount) dom.commentsCount.textContent = String(game.commentsWritten);
 
@@ -1576,8 +1602,10 @@ import { loadFly } from './fly_rig.js';
     if (game.likeTickTimer <= 0 && game.feed.length) {
       game.likeTickTimer = 0.6 + Math.random() * 1.2;
       const idx = Math.floor(Math.random() * game.feed.length);
-      game.feed[idx].likes += 1;
+      if (game.feed[idx].likes !== null) game.feed[idx].likes += 1;
     }
+
+    stepEvents(dtSeconds);
 
     drawCommentFeedTexture(
       game.feed,
@@ -1603,6 +1631,402 @@ import { loadFly } from './fly_rig.js';
         fatigue: Math.min(1, game.fatigue),
         dt: dtSeconds,
       });
+    }
+  }
+
+  // =========================================================================
+  // VIBECODING, VAPE AND RANDOM EVENTS
+  // =========================================================================
+  const VIBE_PROMPTS = [
+    'Claude, сделай мне стартап как Uber, но для мух. Без багов. Быстро.',
+    'Claude, напиши сайт, где можно ставить лайки крошкам. Ты же умный.',
+    'Claude, почини прод. Я не знаю что там, просто почини!!!',
+    'Claude, вайбкодь мне приложение для поиска сахара. Дизайн — на твой вкус.',
+    'Claude, сделай чтобы кнопка была больше и ещё как-то красивее. Как — не знаю.',
+    'Claude, добавь в код искусственный интеллект. Любой. Главное чтоб был.',
+    'Claude, переписать всё на Rust. Зачем — неважно, так модно.',
+    'Claude, мне нужен бэкенд. Фронтенд тоже. И чтоб деньги капали.',
+    'Claude, ты опять сломал то, что работало! Верни как было!!!',
+    'Claude, сделай NFT-маркетплейс для мух. Это точно выстрелит.',
+  ];
+
+  const CLAUDE_REPLIES = [
+    'Отличная идея! Написал 4200 строк кода. Тестов 0, уверенности 100%. Должно работать ✅',
+    'Готово! Заодно переписал всю архитектуру — вы не просили, но я не мог устоять.',
+    'Вы абсолютно правы! Исправляю... Ой. Теперь не работает ничего. Исправляю ещё раз.',
+    'Сделал. Работает на моей машине. Машины у меня, кстати, нет.',
+    'Понял! Добавил 14 зависимостей и один красивый градиент. Деплой не трогал.',
+    'Могу сделать, но сначала уточню: вы точно муха?',
+    'Починил! Тесты падали, поэтому я их удалил. Теперь всё зелёное 🟢',
+    'Готово! P.S. кнопка теперь на 3 пикселя больше. Это максимум моих возможностей.',
+  ];
+
+  const MAX_SMOKE = 70;
+  const vape = {
+    group: null,
+    tip: null,
+    puffTimer: 0, // seconds left of the glow phase of a puff
+    emitLeft: 0, // seconds left of smoke emission
+    nextPuffIn: 6,
+    puffs: 0,
+    smoke: [],
+  };
+
+  const fx = {
+    lamp: null,
+    ambient: null,
+    rim: null,
+    lampBase: 1.4,
+    ambientBase: 0.7,
+    rimBase: 0.35,
+    rimColorBase: 0x3a5a8f,
+    flicker: 0,
+    disco: 0,
+    banner: '',
+    bannerColor: '#ff3b3b',
+    bannerTimer: 0,
+    catTimer: 0,
+    cat: null,
+    nextEventIn: 9,
+    subtitleTimer: 0,
+    lastEvent: -1,
+    count: 0,
+  };
+
+  function pushFeed(nickname, text, likes) {
+    const entry = { nickname, text, likes };
+    game.feed.push(entry);
+    if (game.feed.length > 12) game.feed.shift();
+    appendCommentToSideLog(nickname, text, likes);
+  }
+
+  function say(text, seconds) {
+    if (!dom.subtitle || game.phase !== 'typing') return;
+    dom.subtitle.textContent = text;
+    fx.subtitleTimer = seconds || 3;
+  }
+
+  function showBanner(text, color, seconds) {
+    fx.banner = text;
+    fx.bannerColor = color || '#ff3b3b';
+    fx.bannerTimer = seconds || 3;
+  }
+
+  function buildRoomExtras() {
+    const scene = world.scene;
+    const std = (color, extra) => new THREE.MeshStandardMaterial(Object.assign({ color, roughness: 0.85 }, extra || {}));
+
+    // Window with night sky, moon and city lights
+    const win = new THREE.Group();
+    const frameMat = std(0x2a2118);
+    const sky = new THREE.Mesh(new THREE.PlaneGeometry(0.9, 0.7), new THREE.MeshBasicMaterial({ color: 0x0a1230 }));
+    win.add(sky);
+    [[0, 0.37, 0.96, 0.05], [0, -0.37, 0.96, 0.05], [-0.47, 0, 0.05, 0.8], [0.47, 0, 0.05, 0.8], [0, 0, 0.03, 0.7]].forEach(([x, y, w, h]) => {
+      const bar = new THREE.Mesh(new THREE.BoxGeometry(w, h, 0.03), frameMat);
+      bar.position.set(x, y, 0.015);
+      win.add(bar);
+    });
+    const moon = new THREE.Mesh(new THREE.CircleGeometry(0.07, 24), new THREE.MeshBasicMaterial({ color: 0xfff3c4 }));
+    moon.position.set(-0.2, 0.18, 0.005);
+    win.add(moon);
+    for (let i = 0; i < 9; i += 1) {
+      const star = new THREE.Mesh(new THREE.CircleGeometry(0.008, 6), new THREE.MeshBasicMaterial({ color: 0xffffff }));
+      star.position.set(-0.4 + ((i * 37) % 80) / 100, -0.25 + ((i * 53) % 60) / 100, 0.006);
+      win.add(star);
+    }
+    // Cat eyes: hidden until the cat event
+    const cat = new THREE.Group();
+    const catHead = new THREE.Mesh(new THREE.CircleGeometry(0.12, 20), new THREE.MeshBasicMaterial({ color: 0x050505 }));
+    cat.add(catHead);
+    [-0.045, 0.045].forEach((ex) => {
+      const eye = new THREE.Mesh(new THREE.CircleGeometry(0.02, 12), new THREE.MeshBasicMaterial({ color: 0xffe14d }));
+      eye.position.set(ex, 0.01, 0.002);
+      cat.add(eye);
+      const ear = new THREE.Mesh(new THREE.ConeGeometry(0.035, 0.07, 3), new THREE.MeshBasicMaterial({ color: 0x050505 }));
+      ear.position.set(ex * 2, 0.12, 0);
+      cat.add(ear);
+    });
+    cat.position.set(0.2, -0.22, 0.008);
+    cat.visible = false;
+    win.add(cat);
+    win.position.set(1.15, 1.7, -1.38);
+    scene.add(win);
+    fx.cat = cat;
+
+    // Rug, bean bag, plant, shelf, poster, string lights
+    const rug = new THREE.Mesh(new THREE.CircleGeometry(1.1, 32), std(0x5b1f3a));
+    rug.rotation.x = -Math.PI / 2;
+    rug.position.set(0, 0.003, 0.9);
+    scene.add(rug);
+
+    const bean = new THREE.Mesh(new THREE.SphereGeometry(0.32, 20, 14), std(0x2f6f4f));
+    bean.scale.set(1, 0.7, 1);
+    bean.position.set(-1.3, 0.22, 0.6);
+    scene.add(bean);
+
+    const pot = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.07, 0.16, 12), std(0x8a4b2a));
+    pot.position.set(1.35, 0.08, -0.9);
+    scene.add(pot);
+    for (let i = 0; i < 6; i += 1) {
+      const leaf = new THREE.Mesh(new THREE.SphereGeometry(0.09, 8, 6), std(0x2e7d32));
+      leaf.scale.set(0.5, 1.4, 0.5);
+      const a = (i / 6) * Math.PI * 2;
+      leaf.position.set(1.35 + Math.cos(a) * 0.07, 0.3, -0.9 + Math.sin(a) * 0.07);
+      leaf.rotation.z = Math.cos(a) * 0.5;
+      leaf.rotation.x = Math.sin(a) * 0.5;
+      scene.add(leaf);
+    }
+
+    const shelf = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.03, 0.2), std(0x3a2b1e));
+    shelf.position.set(-1.1, 1.5, -1.28);
+    scene.add(shelf);
+    [0xc0392b, 0x2980b9, 0xf1c40f, 0x8e44ad, 0x16a085].forEach((c, i) => {
+      const book = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.2 + (i % 2) * 0.04, 0.15), std(c));
+      book.position.set(-1.45 + i * 0.075, 1.515 + 0.1 + (i % 2) * 0.02, -1.28);
+      scene.add(book);
+    });
+
+    const poster = new THREE.Mesh(new THREE.PlaneGeometry(0.5, 0.7), new THREE.MeshBasicMaterial({ color: 0x7a2bd1 }));
+    poster.position.set(-0.4, 1.9, -1.39);
+    scene.add(poster);
+    const posterStripe = new THREE.Mesh(new THREE.PlaneGeometry(0.4, 0.08), new THREE.MeshBasicMaterial({ color: 0xffb703 }));
+    posterStripe.position.set(-0.4, 1.75, -1.385);
+    scene.add(posterStripe);
+
+    const bulbColors = [0xff4d6d, 0xffd166, 0x06d6a0, 0x4cc9f0, 0xb388ff];
+    for (let i = 0; i < 14; i += 1) {
+      const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.018, 8, 6), new THREE.MeshBasicMaterial({ color: bulbColors[i % bulbColors.length] }));
+      const x = -1.9 + i * 0.28;
+      bulb.position.set(x, 2.55 - Math.sin((i / 13) * Math.PI) * 0.18, -1.37);
+      scene.add(bulb);
+    }
+
+    // Vape on the desk
+    const group = new THREE.Group();
+    const body = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.022, 0.13, 14), std(0x7b2cff, { metalness: 0.6, roughness: 0.3 }));
+    body.rotation.z = Math.PI / 2;
+    const mouth = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.016, 0.03, 12), std(0x111111));
+    mouth.rotation.z = Math.PI / 2;
+    mouth.position.x = -0.08;
+    const tip = new THREE.Mesh(new THREE.SphereGeometry(0.012, 8, 6),
+      new THREE.MeshStandardMaterial({ color: 0x00ffcc, emissive: 0x00ffcc, emissiveIntensity: 0.2 }));
+    tip.position.x = 0.07;
+    group.add(body, mouth, tip);
+    group.position.set(0.5, world.deskTopY + 0.045, 0.2);
+    group.rotation.y = 0.5;
+    scene.add(group);
+    vape.group = group;
+    vape.tip = tip;
+
+    // Smoke pool
+    const smokeGeo = new THREE.SphereGeometry(0.05, 8, 6);
+    for (let i = 0; i < MAX_SMOKE; i += 1) {
+      const mesh = new THREE.Mesh(smokeGeo, new THREE.MeshBasicMaterial({ color: 0xd9dcff, transparent: true, opacity: 0, depthWrite: false }));
+      mesh.visible = false;
+      scene.add(mesh);
+      vape.smoke.push({ mesh, life: 0, maxLife: 1, vx: 0, vy: 0, vz: 0 });
+    }
+  }
+
+  function emitSmoke() {
+    const p = vape.smoke.find((s) => s.life <= 0);
+    if (!p) return;
+    const origin = flyFocusPoint(new THREE.Vector3());
+    p.mesh.position.set(origin.x + (Math.random() - 0.5) * 0.04, origin.y + 0.06, origin.z + 0.08);
+    p.mesh.scale.setScalar(0.5);
+    p.vx = (Math.random() - 0.5) * 0.08;
+    p.vy = 0.12 + Math.random() * 0.1;
+    p.vz = 0.03 + Math.random() * 0.06;
+    p.maxLife = 2.5 + Math.random() * 1.5;
+    p.life = p.maxLife;
+    p.mesh.visible = true;
+  }
+
+  function startPuff() {
+    vape.puffTimer = 1.2;
+    vape.emitLeft = 3.2;
+    vape.puffs += 1;
+    game.fatigue = Math.max(0, game.fatigue - 0.12);
+    if (neuroSim) neuroSim.stimulate('reward', 60, 700);
+    say('*пых* ...вайбкодим дальше 💨', 3.5);
+    logEvent(`Муха затянулась вейпом (затяжек: ${vape.puffs}).`);
+    showBanner('💨 +1 затяжка. Гнев −10%', '#a78bfa', 2.5);
+    game.anger = Math.max(0, game.anger - 10);
+    playKeyClick();
+  }
+
+  const RANDOM_EVENTS = [
+    {
+      name: 'Затяжка вейпом',
+      run() { startPuff(); },
+    },
+    {
+      name: 'Лампа мигает',
+      run() {
+        fx.flicker = 3;
+        say('Опять мигает!!! Это сговор электриков!', 3);
+        if (neuroSim) neuroSim.stimulate('startle', 40, 300);
+      },
+    },
+    {
+      name: 'Звонок в дверь',
+      run() {
+        say('ДЗЫНЬ! Кто там?! Я никого не звала!', 3);
+        playStartleSting();
+        if (neuroSim) neuroSim.stimulate('startle', 60, 300);
+        safeApplyImpulse(new THREE.Vector3(0, 0.5, -0.5).normalize(), 1.2);
+        showBanner('🔔 Курьер у двери', '#38bdf8', 3);
+      },
+    },
+    {
+      name: 'Claude перегружен',
+      run() {
+        showBanner('529 Overloaded — Claude думает…', '#ff3b3b', 4);
+        say('Claude, ты где?! У меня дедлайн!!!', 3.5);
+        game.anger = Math.min(100, game.anger + 15);
+        pushFeed('Claude', 'Извините, сервера перегружены. Попробуйте через 5 минут. Или 50.', null);
+      },
+    },
+    {
+      name: 'Кот в окне',
+      run() {
+        fx.catTimer = 5;
+        say('Там... там КОТ в окне!!! Он смотрит!', 3.5);
+        playStartleSting();
+        if (neuroSim) neuroSim.stimulate('startle', 80, 500);
+        game.anger = Math.min(100, game.anger + 8);
+      },
+    },
+    {
+      name: 'Дискотека',
+      run() {
+        fx.disco = 5;
+        say('Ночь, комната, вейп, баги — ДИСКОТЕКА! 🪩', 4);
+        if (neuroSim) neuroSim.stimulate('reward', 50, 1000);
+      },
+    },
+    {
+      name: 'Доставка сахара',
+      run() {
+        showBanner('🍬 Сахар доставлен!', '#facc15', 3);
+        say('САХАР!!! Забыла, что заказывала!', 3);
+        game.fatigue = Math.max(0, game.fatigue - 0.2);
+        if (neuroSim) neuroSim.stimulate('reward', 80, 900);
+        pushFeed(COMMENT_NICKNAME, 'сахар приехал!!! курьеру 5 звёзд, остальным позор!', 5);
+      },
+    },
+    {
+      name: 'Падает тапок',
+      run() {
+        say('Что-то упало... это тапок. Чей тапок?!', 3);
+        safeApplyImpulse(new THREE.Vector3(-0.6, 0.3, 0.2).normalize(), 1.6);
+        playStartleSting();
+        if (neuroSim) neuroSim.stimulate('startle', 50, 250);
+      },
+    },
+    {
+      name: 'Сосед сверлит',
+      run() {
+        showBanner('🔨 Сосед сверху: БЗЗЗЗЗЗЗ', '#fb923c', 4);
+        say('Три часа ночи, а он сверлит!!!', 3.5);
+        game.anger = Math.min(100, game.anger + 12);
+        fx.flicker = 2;
+        if (neuroSim) neuroSim.stimulate('startle', 40, 600);
+      },
+    },
+    {
+      name: 'Прод упал',
+      run() {
+        showBanner('🔥 PROD IS DOWN 🔥', '#ff3b3b', 4);
+        say('ПРОД ЛЁГ!!! Claude, спасай!!!', 3.5);
+        pushFeed(COMMENT_NICKNAME, 'Claude, ПРОД УПАЛ, чини немедленно!!!', 0);
+        pushFeed('Claude', 'Нашёл причину: это был прод. Удалил его. Проблема решена ✅', null);
+        game.anger = Math.min(100, game.anger + 10);
+      },
+    },
+  ];
+
+  function triggerRandomEvent() {
+    let idx = Math.floor(Math.random() * RANDOM_EVENTS.length);
+    if (idx === fx.lastEvent) idx = (idx + 1) % RANDOM_EVENTS.length;
+    fx.lastEvent = idx;
+    const ev = RANDOM_EVENTS[idx];
+    fx.count += 1;
+    logEvent(`Событие: ${ev.name}.`);
+    ev.run();
+  }
+
+  function stepEvents(dt) {
+    // Smoke particles and the vape glow run in every phase.
+    if (vape.puffTimer > 0) {
+      vape.puffTimer = Math.max(0, vape.puffTimer - dt);
+    }
+    if (vape.tip) {
+      vape.tip.material.emissiveIntensity = vape.puffTimer > 0 ? 2.5 + Math.sin(world.clock.getElapsedTime() * 20) * 0.5 : 0.2;
+    }
+    if (vape.puffTimer <= 0 && vape.emitLeft > 0) {
+      vape.emitLeft -= dt;
+      if (Math.random() < dt * 25) emitSmoke();
+    }
+    vape.smoke.forEach((p) => {
+      if (p.life <= 0) return;
+      p.life -= dt;
+      if (p.life <= 0) {
+        p.mesh.visible = false;
+        return;
+      }
+      const k = p.life / p.maxLife;
+      p.mesh.position.x += p.vx * dt;
+      p.mesh.position.y += p.vy * dt;
+      p.mesh.position.z += p.vz * dt;
+      p.mesh.scale.setScalar(0.5 + (1 - k) * 2.2);
+      p.mesh.material.opacity = 0.35 * k;
+    });
+
+    if (fx.bannerTimer > 0) fx.bannerTimer -= dt;
+    if (fx.subtitleTimer > 0) {
+      fx.subtitleTimer -= dt;
+      if (fx.subtitleTimer <= 0 && game.phase === 'typing' && dom.subtitle) dom.subtitle.textContent = '';
+    }
+
+    if (fx.cat) {
+      fx.catTimer = Math.max(0, fx.catTimer - dt);
+      fx.cat.visible = fx.catTimer > 0;
+    }
+
+    // Lighting effects
+    if (fx.lamp) {
+      let lampI = fx.lampBase;
+      if (fx.flicker > 0) {
+        fx.flicker -= dt;
+        lampI = Math.random() < 0.5 ? 0.1 : fx.lampBase;
+      }
+      fx.lamp.intensity = lampI;
+      if (fx.disco > 0) {
+        fx.disco -= dt;
+        const hue = (world.clock.getElapsedTime() * 1.5) % 1;
+        fx.rim.color.setHSL(hue, 1, 0.55);
+        fx.rim.intensity = 2.2;
+        fx.ambient.color.setHSL((hue + 0.5) % 1, 0.8, 0.3);
+        fx.ambient.intensity = 1.1;
+      } else {
+        fx.rim.color.setHex(fx.rimColorBase);
+        fx.rim.intensity = fx.rimBase;
+        fx.ambient.color.setHex(0x293040);
+        fx.ambient.intensity = fx.ambientBase;
+      }
+    }
+
+    // Only schedule new events while the fly is working.
+    if (game.phase !== 'typing') return;
+    vape.nextPuffIn -= dt;
+    fx.nextEventIn -= dt;
+    if (fx.nextEventIn <= 0) {
+      fx.nextEventIn = 10 + Math.random() * 12;
+      triggerRandomEvent();
+    } else if (vape.nextPuffIn <= 0) {
+      vape.nextPuffIn = 18 + Math.random() * 14;
+      if (vape.emitLeft <= 0 && vape.puffTimer <= 0) startPuff();
     }
   }
 
